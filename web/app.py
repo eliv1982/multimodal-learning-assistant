@@ -214,7 +214,7 @@ def create_app(*, owns_db_lifecycle: bool = True) -> FastAPI:
             above for why two lifecycle owners must never both do this.
     """
     _disable_uvicorn_access_logging()
-    app = FastAPI(title="Python Tutor Bot — Web API", lifespan=_lifespan)
+    app = FastAPI(title="Multimodal Learning Assistant — Web API", lifespan=_lifespan)
     app.state.owns_db_lifecycle = owns_db_lifecycle
     app.add_exception_handler(RequestValidationError, _sanitized_validation_error_handler)
     app.add_middleware(

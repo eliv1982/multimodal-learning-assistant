@@ -1040,7 +1040,7 @@ def _main(run_service: Optional[_AsyncCallable] = None) -> int:
         run_service = run_unified_service
     try:
         logger.info("=" * 60)
-        logger.info("Personal Python Tutor Bot - Unified Service Starting")
+        logger.info("Multimodal Learning Assistant - Unified Service Starting")
         logger.info("=" * 60)
         asyncio.run(run_service())
     except KeyboardInterrupt:

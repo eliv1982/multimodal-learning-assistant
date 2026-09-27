@@ -124,7 +124,7 @@ if __name__ == "__main__":
     configure_logging()
     try:
         logger.info("="*60)
-        logger.info("Personal Python Tutor Bot - Starting")
+        logger.info("Multimodal Learning Assistant - Starting")
         logger.info("="*60)
         asyncio.run(main())
     except KeyboardInterrupt:
