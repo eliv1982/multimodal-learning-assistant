@@ -14,6 +14,8 @@ import {
 } from "../api/client";
 import { App } from "../App";
 import { AuthProvider } from "../auth/AuthContext";
+import { I18nProvider } from "../i18n/I18nProvider";
+import { LOCALE_STORAGE_KEY } from "../i18n/storage";
 import appCss from "../styles/app.css?raw";
 import {
   SAMPLE_USER,
@@ -26,6 +28,7 @@ import {
   type RecordedCall,
 } from "../test/http";
 import { ChatPanel } from "./ChatPanel";
+import { LanguageSwitcher } from "./LanguageSwitcher";
 
 type Handler = (call: RecordedCall, index: number) => Response | Promise<Response>;
 
@@ -97,9 +100,11 @@ async function renderSignedInApp(chat: Handler) {
     return jsonResponse(599, { detail: `unexpected request ${call.url}` });
   });
   render(
-    <AuthProvider>
-      <App />
-    </AuthProvider>,
+    <I18nProvider>
+      <AuthProvider>
+        <App />
+      </AuthProvider>
+    </I18nProvider>,
   );
   await screen.findByRole("heading", { name: "You’re signed in" });
   return harness;
@@ -110,8 +115,8 @@ describe("initial state", () => {
     chatBackend(() => reply("unused"));
     render(<ChatPanel />);
 
-    expect(screen.getByRole("heading", { name: "Ask the tutor" })).toBeTruthy();
-    expect(within(transcript()).getByText("Ask a question about Python to get started.")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Ask the assistant" })).toBeTruthy();
+    expect(within(transcript()).getByText("Ask a question to get started.")).toBeTruthy();
     expect(screen.getByText(/isn’t saved/).textContent).toMatch(/refreshing the page, signing out, or an expired session/);
     expect(textarea().value).toBe("");
     expect(sendButton().disabled).toBe(true);
@@ -140,7 +145,7 @@ describe("sending a message", () => {
 
     await within(transcript()).findByText("Use a list comprehension.");
     expect(within(transcript()).getByText("How do I square numbers?")).toBeTruthy();
-    expect(within(transcript()).queryByText("Ask a question about Python to get started.")).toBeNull();
+    expect(within(transcript()).queryByText("Ask a question to get started.")).toBeNull();
     expect(textarea().value).toBe("");
     expect(sendButton().disabled).toBe(true);
     expect(screen.queryByRole("alert")).toBeNull();
@@ -164,7 +169,7 @@ describe("sending a message", () => {
     await within(transcript()).findByText("An answer.");
 
     const authors = [...transcript().querySelectorAll(".chat-author")].map((element) => element.textContent);
-    expect(authors).toEqual(["You", "Tutor"]);
+    expect(authors).toEqual(["You", "Assistant"]);
   });
 
   it("sends the confirmed exchanges as history on each next message, in order, with the new message separate", async () => {
@@ -362,7 +367,7 @@ describe("pending state", () => {
     // Shown, but not (yet) a completed exchange: no answer, and nothing to send as history.
     expect(transcript().querySelector(".chat-message-pending .chat-text")?.textContent).toBe("slow question");
     expect(transcript().querySelector(".chat-message-assistant")).toBeNull();
-    expect(within(transcript()).queryByText("Tutor")).toBeNull();
+    expect(within(transcript()).queryByText("Assistant")).toBeNull();
 
     await user.type(textarea(), "more text");
     await user.click(sendButton());
@@ -524,7 +529,7 @@ describe("what can be sent", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByRole("status")).toBeNull();
-    expect(within(transcript()).getByText("Ask a question about Python to get started.")).toBeTruthy();
+    expect(within(transcript()).getByText("Ask a question to get started.")).toBeTruthy();
   });
 
   it("enables Send only for a draft with something in it", async () => {
@@ -946,7 +951,7 @@ describe("no persistence", () => {
     first.unmount();
     render(<ChatPanel />);
 
-    expect(within(transcript()).getByText("Ask a question about Python to get started.")).toBeTruthy();
+    expect(within(transcript()).getByText("Ask a question to get started.")).toBeTruthy();
     expect(textarea().value).toBe("");
     await send(user, "q2");
     await within(transcript()).findByText("remembered?");
@@ -955,6 +960,200 @@ describe("no persistence", () => {
     expect(cookieWrites).not.toHaveBeenCalled();
     expect(localStorage.length).toBe(0);
     expect(sessionStorage.length).toBe(0);
+  });
+});
+
+describe("neutral wording", () => {
+  it("frames the chat as an assistant for any subject, not a Python tutor", () => {
+    chatBackend(() => reply("unused"));
+    render(<ChatPanel />);
+
+    const section = screen.getByRole("region", { name: "Ask the assistant" });
+    expect(section.textContent).not.toMatch(/python|tutor/i);
+    expect(within(section).getByRole("heading", { level: 2, name: "Ask the assistant" })).toBeTruthy();
+    expect(within(transcript()).getByText("Ask a question to get started.")).toBeTruthy();
+    expect(screen.getByText(/Enter to send, Shift\+Enter for a new line\. 0 \/ 4000/)).toBeTruthy();
+  });
+
+  it("calls the other side of the conversation the Assistant, and the user You", async () => {
+    const user = userEvent.setup();
+    chatBackend(() => reply("An answer."));
+    render(<ChatPanel />);
+
+    await send(user, "A question?");
+    await within(transcript()).findByText("An answer.");
+
+    expect(within(transcript()).getByText("Assistant")).toBeTruthy();
+    expect(within(transcript()).getByText("You")).toBeTruthy();
+    expect(transcript().textContent).not.toMatch(/tutor/i);
+  });
+
+  it("stays neutral while a reply is awaited and when a message fails", async () => {
+    const user = userEvent.setup();
+    const gate = deferred<Response>();
+    chatBackend(inOrder(() => gate.promise, () => jsonResponse(500, {})));
+    render(<ChatPanel />);
+
+    await send(user, "hello");
+    expect(screen.getByRole("region", { name: "Ask the assistant" }).textContent).not.toMatch(/python|tutor/i);
+    await settle(gate, jsonResponse(500, {}));
+
+    expect((await screen.findByRole("alert")).textContent).not.toMatch(/python|tutor/i);
+  });
+});
+
+describe("transcript and composer", () => {
+  it("keeps the transcript a labelled, focusable, polite log, and the composer a separate form outside it", async () => {
+    const user = userEvent.setup();
+    chatBackend(() => reply("An answer."));
+    render(<ChatPanel />);
+
+    const log = transcript();
+    expect(log.getAttribute("role")).toBe("log");
+    expect(log.getAttribute("aria-label")).toBe("Conversation");
+    expect(log.getAttribute("tabindex")).toBe("0");
+    expect(log.getAttribute("aria-busy")).toBe("false");
+
+    const form = textarea().closest("form") as HTMLFormElement;
+    expect(form.classList.contains("chat-composer")).toBe(true);
+    expect(log.contains(form)).toBe(false);
+    expect(log.contains(textarea())).toBe(false);
+    expect(log.contains(sendButton())).toBe(false);
+    // The composer follows the transcript, in reading and tab order.
+    expect(log.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await send(user, "hi");
+    await within(log).findByText("An answer.");
+    expect(within(log).queryByRole("textbox")).toBeNull();
+    expect(within(log).queryByRole("button")).toBeNull();
+    expect(log.querySelectorAll("li")).toHaveLength(1);
+  });
+
+  it("keeps status and errors with the composer, not inside the conversation log", async () => {
+    const user = userEvent.setup();
+    const gate = deferred<Response>();
+    chatBackend(inOrder(() => gate.promise, () => jsonResponse(500, {})));
+    render(<ChatPanel />);
+
+    await send(user, "hi");
+    expect(within(transcript()).queryByRole("status")).toBeNull();
+    expect(screen.getByRole("status").closest(".chat-compose")).not.toBeNull();
+    await settle(gate, jsonResponse(500, {}));
+
+    const alert = await screen.findByRole("alert");
+    expect(transcript().contains(alert)).toBe(false);
+    expect(alert.closest(".chat-compose")).not.toBeNull();
+  });
+
+  it("labels the message box and describes it by the character hint", () => {
+    chatBackend(() => reply("unused"));
+    render(<ChatPanel />);
+
+    const hint = document.getElementById(textarea().getAttribute("aria-describedby") ?? "");
+    expect(hint?.textContent).toBe("Enter to send, Shift+Enter for a new line. 0 / 4000");
+    expect(textarea().labels?.[0]?.textContent).toBe("Your message");
+  });
+});
+
+describe("in Russian", () => {
+  function renderRussian() {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    return render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <ChatPanel />
+      </I18nProvider>,
+    );
+  }
+
+  it("shows the empty conversation, its notice and the composer in Russian", () => {
+    chatBackend(() => reply("unused"));
+    renderRussian();
+
+    expect(screen.getByRole("heading", { name: "Спросите ассистента" })).toBeTruthy();
+    expect(screen.getByText(/Эта переписка не сохраняется/)).toBeTruthy();
+    expect(screen.getByRole("log", { name: "Переписка" })).toBeTruthy();
+    expect(screen.getByText("Задайте вопрос, чтобы начать.")).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Ваше сообщение" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeTruthy();
+    expect(screen.getByText("Enter — отправить, Shift+Enter — новая строка. 0 / 4000")).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/Ask the assistant|Your message|isn’t saved/);
+  });
+
+  it("interpolates the counts, and words the over-limit refusal in Russian", async () => {
+    const user = userEvent.setup();
+    chatBackend(() => reply("ok"));
+    renderRussian();
+
+    await user.click(screen.getByRole("textbox", { name: "Ваше сообщение" }));
+    await user.paste("x".repeat(4001));
+
+    expect(screen.getByText(/Слишком длинное сообщение: 4001 из 4000 символов/)).toBeTruthy();
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Отправить" }).disabled).toBe(true);
+    expect(document.body.textContent).not.toContain("{length}");
+    expect(document.body.textContent).not.toContain("{max}");
+  });
+
+  it("labels the speakers Вы and Ассистент, and sends the same request as in English", async () => {
+    const user = userEvent.setup();
+    const { chatCalls } = chatBackend(() => reply("Ответ"));
+    renderRussian();
+
+    await user.click(screen.getByRole("textbox", { name: "Ваше сообщение" }));
+    await user.paste("Вопрос");
+    await user.click(screen.getByRole("button", { name: "Отправить" }));
+    await within(screen.getByRole("log", { name: "Переписка" })).findByText("Ответ");
+
+    const authors = [...screen.getByRole("log").querySelectorAll(".chat-author")].map((element) => element.textContent);
+    expect(authors).toEqual(["Вы", "Ассистент"]);
+    // The interface language is not part of the chat contract.
+    expect(chatCalls()).toHaveLength(1);
+    expect(body(chatCalls()[0])).toEqual({ message: "Вопрос", history: [] });
+    expect(Object.keys(body(chatCalls()[0])).sort()).toEqual(["history", "message"]);
+  });
+
+  it("changes the language of a conversation already on screen without touching its text", async () => {
+    const user = userEvent.setup();
+    const { chatCalls } = chatBackend(() => reply("An answer."));
+    render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <ChatPanel />
+      </I18nProvider>,
+    );
+    await send(user, "A question?");
+    await within(transcript()).findByText("An answer.");
+    const log = transcript();
+
+    await user.click(screen.getByRole("button", { name: "Русский" }));
+
+    expect(screen.getByRole("log", { name: "Переписка" })).toBe(log);
+    const authors = [...log.querySelectorAll(".chat-author")].map((element) => element.textContent);
+    expect(authors).toEqual(["Вы", "Ассистент"]);
+    expect([...log.querySelectorAll(".chat-text")].map((element) => element.textContent)).toEqual([
+      "A question?",
+      "An answer.",
+    ]);
+    expect(chatCalls()).toHaveLength(1);
+  });
+
+  it("keeps untrusted text literal in Russian too", async () => {
+    const user = userEvent.setup();
+    const markup = '<b>жирный</b> <img src=x onerror="window.pwned=1">';
+    chatBackend(() => reply(markup));
+    renderRussian();
+
+    await user.click(screen.getByRole("textbox", { name: "Ваше сообщение" }));
+    await user.paste(markup);
+    await user.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() => expect(screen.getByRole("log").querySelectorAll(".chat-message-assistant")).toHaveLength(1));
+
+    expect([...screen.getByRole("log").querySelectorAll(".chat-text")].map((element) => element.textContent)).toEqual([
+      markup,
+      markup,
+    ]);
+    expect(screen.getByRole("log").querySelector("b, img")).toBeNull();
+    expect(Reflect.get(window, "pwned")).toBeUndefined();
   });
 });
 

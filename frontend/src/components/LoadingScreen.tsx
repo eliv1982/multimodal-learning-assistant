@@ -1,9 +1,14 @@
+import { useI18n } from "../i18n/useI18n";
+import { ScreenLayout } from "./ScreenLayout";
+
 export function LoadingScreen() {
+  const { t } = useI18n();
+
   return (
-    <main className="screen">
+    <ScreenLayout>
       <div className="card" role="status" aria-live="polite">
-        <p className="muted">Checking your session…</p>
+        <p className="muted">{t("loading.session")}</p>
       </div>
-    </main>
+    </ScreenLayout>
   );
 }

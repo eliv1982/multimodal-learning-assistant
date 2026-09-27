@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 
-import { toApiError } from "../api/client";
+import { ApiError, toApiError } from "../api/client";
 import {
   CHAT_MAX_MESSAGE_CODE_POINTS,
   CHAT_REQUEST_REFUSED_DETAIL,
@@ -9,6 +9,8 @@ import {
   sendChatMessage,
   type ChatExchange,
 } from "../api/chat";
+import { apiErrorMessage } from "../i18n/apiErrors";
+import { useI18n } from "../i18n/useI18n";
 
 interface TranscriptEntry extends ChatExchange {
   id: number;
@@ -29,7 +31,9 @@ interface ChatPanelProps {
  *   only together with its reply; on failure it is dropped and the text stays
  *   in `draft` for another try.
  * - Every piece of text is rendered as a plain React text node. Errors show
- *   only the client-owned `ApiError.detail`, never anything the server said.
+ *   only the client-owned `ApiError.detail` (translated), never anything the
+ *   server said. The error itself is kept, not its text, so it follows a
+ *   language switch.
  * - `disabled` (a sign-out is pending) makes the composer inert but keeps the
  *   draft: a failed sign-out leaves the session valid, and the user then finds
  *   the chat exactly as they left it. A reply that is already awaited is
@@ -40,7 +44,8 @@ export function ChatPanel({ disabled = false }: ChatPanelProps) {
   const [exchanges, setExchanges] = useState<TranscriptEntry[]>([]);
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<string | null>(null);
-  const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  const [error, setError] = useState<ApiError | null>(null);
+  const { t } = useI18n();
 
   // `pending` only changes on the next render, so two submits in the same tick
   // would both see it null. The ref is the synchronous guard.
@@ -82,7 +87,7 @@ export function ChatPanel({ disabled = false }: ChatPanelProps) {
     if (!built.ok) {
       // A blank draft is simply not sent; anything else is the size contract.
       if (built.problem !== "empty-message") {
-        setErrorDetail(CHAT_REQUEST_REFUSED_DETAIL);
+        setError(new ApiError(0, CHAT_REQUEST_REFUSED_DETAIL));
       }
       return;
     }
@@ -92,7 +97,7 @@ export function ChatPanel({ disabled = false }: ChatPanelProps) {
     controller.current = request;
     const message = draft;
     setPending(message);
-    setErrorDetail(null);
+    setError(null);
     // Sending with the button would otherwise strand focus on a button that is
     // about to be disabled. The composer stays focusable while it is read-only.
     input.current?.focus();
@@ -108,12 +113,12 @@ export function ChatPanel({ disabled = false }: ChatPanelProps) {
         setExchanges((previous) => [...previous, { id, user: message, assistant: reply.text }]);
         setDraft("");
         setPending(null);
-      } catch (error) {
+      } catch (failure) {
         if (request.signal.aborted) {
           return;
         }
         setPending(null);
-        setErrorDetail(toApiError(error).detail);
+        setError(toApiError(failure));
       } finally {
         inFlight.current = false;
         if (controller.current === request) {
@@ -151,25 +156,27 @@ export function ChatPanel({ disabled = false }: ChatPanelProps) {
 
   return (
     <section className="chat" aria-labelledby={`${inputId}-title`}>
-      <h2 id={`${inputId}-title`}>Ask the tutor</h2>
-      <p className="muted chat-note">
-        This conversation isn’t saved: refreshing the page, signing out, or an expired session clears it. Only your
-        recent messages are sent along as context.
-      </p>
+      <h2 id={`${inputId}-title`}>{t("chat.title")}</h2>
+      <p className="muted chat-note">{t("chat.note")}</p>
 
-      <div className="chat-transcript" ref={transcript} role="log" aria-label="Conversation" aria-busy={isPending} tabIndex={0}>
-        {exchanges.length === 0 && !isPending && (
-          <p className="muted chat-empty">Ask a question about Python to get started.</p>
-        )}
+      <div
+        className="chat-transcript"
+        ref={transcript}
+        role="log"
+        aria-label={t("chat.transcriptLabel")}
+        aria-busy={isPending}
+        tabIndex={0}
+      >
+        {exchanges.length === 0 && !isPending && <p className="muted chat-empty">{t("chat.empty")}</p>}
         <ol className="chat-messages">
           {exchanges.map((exchange) => (
             <li key={exchange.id} className="chat-exchange">
               <div className="chat-message chat-message-user">
-                <span className="chat-author">You</span>
+                <span className="chat-author">{t("chat.you")}</span>
                 <div className="chat-text">{exchange.user}</div>
               </div>
               <div className="chat-message chat-message-assistant">
-                <span className="chat-author">Tutor</span>
+                <span className="chat-author">{t("chat.assistant")}</span>
                 <div className="chat-text">{exchange.assistant}</div>
               </div>
             </li>
@@ -177,7 +184,7 @@ export function ChatPanel({ disabled = false }: ChatPanelProps) {
           {pending !== null && (
             <li className="chat-exchange">
               <div className="chat-message chat-message-user chat-message-pending">
-                <span className="chat-author">You</span>
+                <span className="chat-author">{t("chat.you")}</span>
                 <div className="chat-text">{pending}</div>
               </div>
             </li>
@@ -186,24 +193,26 @@ export function ChatPanel({ disabled = false }: ChatPanelProps) {
       </div>
 
       {/* Pinned to the bottom of the viewport, so the status and any error stay
-          next to the box they are about instead of scrolling out of sight. */}
+          next to the box they are about instead of scrolling out of sight. The
+          composer is its own raised card: the transcript above is for reading,
+          this is where the user writes and acts. */}
       <div className="chat-compose">
         {isPending && (
           <p className="muted chat-status" role="status">
-            Waiting for a reply…
+            {t("chat.waiting")}
           </p>
         )}
 
-        {errorDetail !== null && (
+        {error !== null && (
           <div className="notice notice-error" role="alert">
-            <p>Your message wasn’t added to the conversation. It’s still in the box below.</p>
-            <p className="muted">{errorDetail}</p>
+            <p>{t("chat.notAdded")}</p>
+            <p className="muted">{apiErrorMessage(error, t)}</p>
           </div>
         )}
 
-        <form onSubmit={onSubmit} noValidate>
+        <form className="chat-composer" onSubmit={onSubmit} noValidate>
           <label className="visually-hidden" htmlFor={inputId}>
-            Your message
+            {t("chat.messageLabel")}
           </label>
           <textarea
             id={inputId}
@@ -223,11 +232,11 @@ export function ChatPanel({ disabled = false }: ChatPanelProps) {
           <div className="chat-composer-row">
             <span id={hintId} className={overLimit ? "chat-hint chat-hint-over" : "chat-hint"}>
               {overLimit
-                ? `Too long: ${draftLength} of ${CHAT_MAX_MESSAGE_CODE_POINTS} characters. Shorten it to send.`
-                : `Enter to send, Shift+Enter for a new line. ${draftLength} / ${CHAT_MAX_MESSAGE_CODE_POINTS}`}
+                ? t("chat.tooLong", { length: draftLength, max: CHAT_MAX_MESSAGE_CODE_POINTS })
+                : t("chat.hint", { length: draftLength, max: CHAT_MAX_MESSAGE_CODE_POINTS })}
             </span>
             <button type="submit" className="button" disabled={!canSend}>
-              {isPending ? "Sending…" : "Send"}
+              {isPending ? t("chat.sending") : t("chat.send")}
             </button>
           </div>
         </form>

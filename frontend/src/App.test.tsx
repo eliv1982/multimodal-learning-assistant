@@ -14,6 +14,8 @@ import {
 import { App } from "./App";
 import { AuthProvider } from "./auth/AuthContext";
 import { useAuth } from "./auth/useAuth";
+import { I18nProvider } from "./i18n/I18nProvider";
+import { LOCALE_STORAGE_KEY } from "./i18n/storage";
 import {
   REPLACEMENT_CHARACTER,
   SAMPLE_USER,
@@ -37,10 +39,12 @@ const ACCOUNT_LINK_RESPONSE = {
 
 function renderApp(extra?: React.ReactNode) {
   return render(
-    <AuthProvider>
-      <App />
-      {extra}
-    </AuthProvider>,
+    <I18nProvider>
+      <AuthProvider>
+        <App />
+        {extra}
+      </AuthProvider>
+    </I18nProvider>,
   );
 }
 
@@ -94,8 +98,21 @@ const networkDown = () => {
 async function signedInApp(options: Parameters<typeof backend>[0] = {}) {
   const harness = backend({ me: () => jsonResponse(200, SAMPLE_USER), ...options });
   renderApp();
-  await screen.findByRole("heading", { name: "You’re signed in" });
+  // The shell's page heading, in whichever interface language is showing.
+  await screen.findByRole("heading", { name: /^(You’re signed in|Вы вошли в систему)$/ });
   return harness;
+}
+
+/**
+ * Account connections and Settings live in a side panel that starts closed.
+ * Opens it (or leaves it open): what a user does before touching either.
+ */
+async function openSettings() {
+  const trigger = await screen.findByRole("button", { name: "Settings" });
+  if (trigger.getAttribute("aria-expanded") !== "true") {
+    await userEvent.setup().click(trigger);
+  }
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
 }
 
 describe("session bootstrap", () => {
@@ -280,9 +297,11 @@ describe("session bootstrap", () => {
 
     render(
       <StrictMode>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
+        <I18nProvider>
+          <AuthProvider>
+            <App />
+          </AuthProvider>
+        </I18nProvider>
       </StrictMode>,
     );
 
@@ -379,6 +398,7 @@ describe("account linking integration", () => {
     });
     renderApp();
 
+    await openSettings();
     await user.click(await screen.findByRole("button", { name: "Link Telegram" }));
     await user.click(await screen.findByRole("button", { name: "Check link status" }));
 
@@ -403,6 +423,7 @@ describe("account linking integration", () => {
     });
     renderApp();
 
+    await openSettings();
     await user.click(await screen.findByRole("button", { name: "Link Telegram" }));
     await user.click(await screen.findByRole("button", { name: "Check link status" }));
 
@@ -424,6 +445,7 @@ describe("account linking integration", () => {
     });
     renderApp();
 
+    await openSettings();
     await user.click(await screen.findByRole("button", { name: "Link Telegram" }));
     await user.click(await screen.findByRole("button", { name: "Check link status" }));
 
@@ -439,6 +461,7 @@ describe("account linking integration", () => {
         call.url === "/api/unlink/github" ? jsonResponse(200, { status: "ok" }) : jsonResponse(599, {}),
     });
 
+    await openSettings();
     await user.click(screen.getByRole("button", { name: "Disconnect GitHub web access" }));
     await user.click(screen.getByRole("button", { name: "Confirm disconnect" }));
 
@@ -456,6 +479,7 @@ describe("account linking integration", () => {
           : jsonResponse(599, {}),
     });
 
+    await openSettings();
     await user.click(screen.getByRole("button", { name: "Disconnect GitHub web access" }));
     await user.click(screen.getByRole("button", { name: "Confirm disconnect" }));
 
@@ -480,6 +504,7 @@ describe("account linking integration", () => {
       },
     });
     renderApp();
+    await openSettings();
     await user.click(await screen.findByRole("button", { name: "Link Telegram" }));
     await user.click(await screen.findByRole("button", { name: "Check link status" }));
 
@@ -498,6 +523,7 @@ describe("account linking integration", () => {
     const gate = deferred<Response>();
     await signedInApp({ other: (call) => (call.url === "/api/link/telegram/start" ? gate.promise : jsonResponse(599, {})) });
 
+    await openSettings();
     await user.click(screen.getByRole("button", { name: "Link Telegram" }));
 
     expect(screen.getByRole("button", { name: "Sign out" }).hasAttribute("disabled")).toBe(true);
@@ -509,6 +535,7 @@ describe("account linking integration", () => {
     const user = userEvent.setup();
     const gate = deferred<Response>();
     await signedInApp({ logout: () => gate.promise });
+    await openSettings();
 
     await user.click(screen.getByRole("button", { name: "Sign out" }));
 
@@ -525,7 +552,10 @@ describe("settings integration", () => {
     within(settingsRegion()).getByRole<HTMLSelectElement>("combobox", { name: "Preferred mode" });
   const settingsSave = () =>
     within(settingsRegion()).getByRole<HTMLButtonElement>("button", { name: /^(Save|Saving…)$/ });
-  const settingsLoaded = () => waitFor(() => expect(settingsSelect().disabled).toBe(false));
+  const settingsLoaded = async () => {
+    await openSettings();
+    await waitFor(() => expect(settingsSelect().disabled).toBe(false));
+  };
   const chatAndLinking = (call: RecordedCall) => {
     if (call.url === "/api/chat") return jsonResponse(200, { text: "Use a list comprehension." });
     if (call.url === "/api/link/telegram/start") return jsonResponse(200, ACCOUNT_LINK_RESPONSE);
@@ -562,14 +592,16 @@ describe("settings integration", () => {
     expect(screen.queryByRole("combobox")).toBeNull();
   });
 
-  it("sits between the account connections and the chat as an independent sibling", async () => {
+  it("sits with the account connections in the Settings side panel, apart from the chat, as an independent sibling", async () => {
     await signedInApp();
+    await openSettings();
 
-    const account = screen.getByRole("heading", { name: "Account connections" });
-    const settings = screen.getByRole("heading", { name: "Settings" });
-    const chat = screen.getByRole("heading", { name: "Ask the tutor" });
+    const panel = screen.getByRole("complementary", { name: "Account and settings" });
+    const account = within(panel).getByRole("heading", { name: "Account connections" });
+    const settings = within(panel).getByRole("heading", { name: "Settings" });
     expect(account.compareDocumentPosition(settings) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(settings.compareDocumentPosition(chat) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(screen.getByRole("main")).queryByRole("heading", { name: "Settings" })).toBeNull();
+    expect(panel.contains(screen.getByRole("heading", { name: "Ask the assistant" }))).toBe(false);
     expect(within(settingsRegion()).queryByRole("log")).toBeNull();
     expect(within(settingsRegion()).queryByRole("button", { name: /link telegram|disconnect/i })).toBeNull();
   });
@@ -637,6 +669,7 @@ describe("settings integration", () => {
     await signedInApp({ other: (call) => (call.url === "/api/link/telegram/start" ? gate.promise : jsonResponse(599, {})) });
     await settingsLoaded();
 
+    await openSettings();
     await user.click(screen.getByRole("button", { name: "Link Telegram" }));
 
     expect(screen.getByRole("button", { name: "Disconnect GitHub web access" }).hasAttribute("disabled")).toBe(true);
@@ -662,6 +695,7 @@ describe("settings integration", () => {
     await user.paste("How do I square numbers?");
     await user.click(screen.getByRole("button", { name: "Send" }));
     await within(screen.getByRole("log", { name: "Conversation" })).findByText("Use a list comprehension.");
+    await openSettings();
     await user.click(screen.getByRole("button", { name: "Link Telegram" }));
 
     expect(await screen.findByRole("link", { name: "Open Telegram" })).toBeTruthy();
@@ -680,6 +714,7 @@ describe("settings integration", () => {
       settings: () => jsonResponse(503, { detail: SENSITIVE_DETAILS[0] }),
       other: chatAndLinking,
     });
+    await openSettings();
 
     const alert = await within(settingsRegion()).findByRole("alert");
     expect(alert.textContent).toContain(SERVER_ERROR_DETAIL);
@@ -691,6 +726,7 @@ describe("settings integration", () => {
     await user.paste("hello");
     await user.click(screen.getByRole("button", { name: "Send" }));
     await within(screen.getByRole("log", { name: "Conversation" })).findByText("Use a list comprehension.");
+    await openSettings();
     await user.click(screen.getByRole("button", { name: "Link Telegram" }));
     expect(await screen.findByRole("link", { name: "Open Telegram" })).toBeTruthy();
   });
@@ -741,18 +777,16 @@ describe("documents integration", () => {
     expect(screen.queryByLabelText("Choose a document file")).toBeNull();
   });
 
-  it("sits between Settings and the chat, and coexists with Account connections as an independent sibling", async () => {
+  it("follows the chat as the second workspace, and stays an independent sibling of Settings and Account connections", async () => {
     await signedInApp();
+    await openSettings();
 
-    const account = screen.getByRole("heading", { name: "Account connections" });
-    const settings = screen.getByRole("heading", { name: "Settings" });
     const documents = screen.getByRole("heading", { name: "Documents" });
-    const chat = screen.getByRole("heading", { name: "Ask the tutor" });
-    expect(account.compareDocumentPosition(settings) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(settings.compareDocumentPosition(documents) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(documents.compareDocumentPosition(chat) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(documentsRegion().parentElement).toBe(screen.getByRole("region", { name: "Settings" }).parentElement);
+    const chat = screen.getByRole("heading", { name: "Ask the assistant" });
+    expect(chat.compareDocumentPosition(documents) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(documentsRegion().parentElement).toBe(screen.getByRole("region", { name: "Ask the assistant" }).parentElement);
     expect(documentsRegion().contains(screen.getByRole("region", { name: "Settings" }))).toBe(false);
+    expect(documentsRegion().contains(screen.getByRole("region", { name: "Account connections" }))).toBe(false);
     expect(within(documentsRegion()).queryByRole("log")).toBeNull();
     expect(within(documentsRegion()).queryByRole("combobox")).toBeNull();
     expect(within(documentsRegion()).queryByRole("button", { name: /link telegram|disconnect/i })).toBeNull();
@@ -779,6 +813,7 @@ describe("documents integration", () => {
     // Informational only: uploading is not blocked.
     expect(fileInput().disabled).toBe(false);
 
+    await openSettings();
     await user.click(screen.getByRole("button", { name: "Link Telegram" }));
     await user.click(await screen.findByRole("button", { name: "Check link status" }));
 
@@ -884,6 +919,7 @@ describe("documents integration", () => {
     });
     await documentsLoaded();
 
+    await openSettings();
     await user.click(screen.getByRole("button", { name: "Disconnect GitHub web access" }));
     await user.click(screen.getByRole("button", { name: "Confirm disconnect" }));
 
@@ -915,6 +951,7 @@ describe("documents integration", () => {
     });
     await documentsLoaded();
 
+    await openSettings();
     await user.click(screen.getByRole("button", { name: "Link Telegram" }));
 
     expect(screen.getByRole("button", { name: "Disconnect GitHub web access" }).hasAttribute("disabled")).toBe(true);
@@ -1258,6 +1295,759 @@ describe("browser storage and cookies", () => {
       expect(call.url).not.toContain("dev-csrf");
       expect(call.init.body).toBeUndefined();
     }
+  });
+});
+
+describe("authenticated shell hierarchy", () => {
+  it("makes Chat and then Documents the primary content, and keeps account and preferences out of it", async () => {
+    await signedInApp();
+
+    const main = screen.getByRole("main");
+    const chat = within(main).getByRole("region", { name: "Ask the assistant" });
+    const documents = within(main).getByRole("region", { name: "Documents" });
+    expect(chat.compareDocumentPosition(documents) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(chat).getByRole("log", { name: "Conversation" })).toBeTruthy();
+    expect(within(chat).getByRole("textbox", { name: "Your message" })).toBeTruthy();
+    // Nothing else is in the workspace: account and preferences are in Settings.
+    expect(main.querySelector(".account-panel, .settings-panel, .facts")).toBeNull();
+    expect(main.textContent).not.toContain("Member since");
+    expect(main.textContent).not.toContain("Account connections");
+  });
+
+  it("puts Account connections, the Settings preference and Member since in the Settings side panel, not in the workspace", async () => {
+    await signedInApp();
+    await openSettings();
+
+    const panel = screen.getByRole("complementary", { name: "Account and settings" });
+    expect(within(panel).getByRole("region", { name: "Account connections" })).toBeTruthy();
+    expect(within(panel).getByRole("region", { name: "Settings" })).toBeTruthy();
+    expect(within(panel).getByText("Member since")).toBeTruthy();
+    expect(within(panel).getByText(/2026/)).toBeTruthy();
+    expect(panel.contains(screen.getByRole("main"))).toBe(false);
+    expect(screen.getByRole("main").contains(panel)).toBe(false);
+    expect(within(panel).queryByRole("region", { name: "Documents" })).toBeNull();
+    expect(within(panel).queryByRole("region", { name: "Ask the assistant" })).toBeNull();
+  });
+
+  it("keeps Sign out, the language switcher and the Settings button in the header, open or closed", async () => {
+    await signedInApp();
+    const header = screen.getByRole("banner");
+    const inHeader = () => ({
+      signOut: within(header).queryByRole("button", { name: "Sign out" }),
+      language: within(header).queryByRole("group", { name: "Language" }),
+      settings: within(header).queryByRole("button", { name: "Settings" }),
+    });
+
+    expect(Object.values(inHeader()).every((element) => element !== null)).toBe(true);
+    await openSettings();
+    expect(Object.values(inHeader()).every((element) => element !== null)).toBe(true);
+  });
+
+  it("names the product in the header without translating it", async () => {
+    await signedInApp();
+
+    expect(within(screen.getByRole("banner")).getByText("Multimodal Learning Assistant")).toBeTruthy();
+  });
+
+  it("is domain-neutral: no Python or tutor framing anywhere in the signed-in shell", async () => {
+    await signedInApp();
+    await openSettings();
+
+    const visibleText = [screen.getByRole("banner"), screen.getByRole("main")].map((part) => part.textContent).join(" ");
+    expect(visibleText).not.toMatch(/python|tutor/i);
+  });
+});
+
+describe("Settings side panel", () => {
+  const trigger = () => screen.getByRole<HTMLButtonElement>("button", { name: "Settings" });
+  // A hidden panel is outside the accessibility tree, and its accessible name is not computed: ask for it
+  // explicitly, and check its label separately.
+  const panel = () => screen.getByRole("complementary", { hidden: true });
+  const panelLabel = () => document.getElementById(panel().getAttribute("aria-labelledby") ?? "")?.textContent;
+
+  it("starts closed, but mounted: a non-modal disclosure the trigger names and controls", async () => {
+    await signedInApp();
+
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    expect(trigger().getAttribute("aria-controls")).toBe(panel().id);
+    expect(panelLabel()).toBe("Account and settings");
+    expect(panel().hidden).toBe(true);
+    // Mounted: its contents exist (and would be reachable to assistive technology the moment it opens).
+    expect(panel().querySelector(".account-panel")).not.toBeNull();
+    expect(panel().querySelector(".settings-panel")).not.toBeNull();
+    expect(screen.queryByRole("complementary", { name: "Account and settings" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Link Telegram" })).toBeNull();
+    expect(within(panel()).getByRole("button", { name: "Link Telegram", hidden: true })).toBeTruthy();
+  });
+
+  it("is not a dialog: no dialog role, no aria-modal, nothing inert, in either state", async () => {
+    await signedInApp();
+    const check = () => {
+      expect(document.querySelector("[aria-modal]")).toBeNull();
+      expect(document.querySelector('[role="dialog"], [role="alertdialog"], dialog')).toBeNull();
+      expect(document.querySelector("[inert]")).toBeNull();
+      expect(panel().getAttribute("role")).toBeNull();
+    };
+
+    check();
+    await openSettings();
+    check();
+  });
+
+  it("opens on click: expanded and visible, focus moves into the panel, and the rest of the page stays live", async () => {
+    const user = userEvent.setup();
+    await signedInApp();
+
+    await user.click(trigger());
+
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(panel().hidden).toBe(false);
+    expect(screen.getByRole("complementary", { name: "Account and settings" })).toBeTruthy();
+    expect(document.activeElement).toBe(within(panel()).getByRole("heading", { name: "Account and settings" }));
+    expect(panel().contains(document.activeElement)).toBe(true);
+
+    // Non-modal: the chat and the header are neither inert nor hidden from assistive technology.
+    const main = screen.getByRole("main");
+    expect(main.hasAttribute("inert")).toBe(false);
+    expect(main.closest("[aria-hidden]")).toBeNull();
+    expect(screen.getByRole("banner").hasAttribute("inert")).toBe(false);
+    await user.click(screen.getByRole("textbox", { name: "Your message" }));
+    await user.paste("still typing");
+    expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Your message" }).value).toBe("still typing");
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Sign out" }).disabled).toBe(false);
+    // Focus was free to leave the panel: there is no trap.
+    expect(panel().contains(document.activeElement)).toBe(false);
+  });
+
+  it("closes with its Close button, and focus returns to the Settings button", async () => {
+    const user = userEvent.setup();
+    await signedInApp();
+    await user.click(trigger());
+
+    await user.click(within(panel()).getByRole("button", { name: "Close" }));
+
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    expect(panel().hidden).toBe(true);
+    expect(document.activeElement).toBe(trigger());
+  });
+
+  it("closes with the Settings button itself", async () => {
+    const user = userEvent.setup();
+    await signedInApp();
+    await user.click(trigger());
+
+    await user.click(trigger());
+
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    expect(panel().hidden).toBe(true);
+    expect(document.activeElement).toBe(trigger());
+  });
+
+  it("closes on Escape from where focus landed when it opened, and focus returns to the Settings button", async () => {
+    const user = userEvent.setup();
+    await signedInApp();
+    await user.click(trigger());
+    expect(panel().contains(document.activeElement)).toBe(true);
+
+    await user.keyboard("{Escape}");
+
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    expect(panel().hidden).toBe(true);
+    expect(document.activeElement).toBe(trigger());
+  });
+
+  it("closes on Escape from a control inside the panel", async () => {
+    const user = userEvent.setup();
+    await signedInApp();
+    await user.click(trigger());
+    const mode = within(panel()).getByRole<HTMLSelectElement>("combobox", { name: "Preferred mode" });
+    await waitFor(() => expect(mode.disabled).toBe(false));
+    mode.focus();
+    expect(document.activeElement).toBe(mode);
+
+    await user.keyboard("{Escape}");
+
+    expect(panel().hidden).toBe(true);
+    expect(document.activeElement).toBe(trigger());
+  });
+
+  it("closes on Escape from the Settings button while open", async () => {
+    const user = userEvent.setup();
+    await signedInApp();
+    await user.click(trigger());
+    trigger().focus();
+
+    await user.keyboard("{Escape}");
+
+    expect(panel().hidden).toBe(true);
+    expect(document.activeElement).toBe(trigger());
+  });
+
+  it("closes on Escape when an action inside the panel has left focus nowhere, as removing the focused button does", async () => {
+    const user = userEvent.setup();
+    await signedInApp();
+    await user.click(trigger());
+    (document.activeElement as HTMLElement).blur();
+    expect(document.activeElement).toBe(document.body);
+
+    await user.keyboard("{Escape}");
+
+    expect(panel().hidden).toBe(true);
+    expect(document.activeElement).toBe(trigger());
+  });
+
+  it("ignores Escape while focus is in the workspace: it is not a modal, so it does not grab the key", async () => {
+    const user = userEvent.setup();
+    await signedInApp();
+    await user.click(trigger());
+    await user.click(screen.getByRole("textbox", { name: "Your message" }));
+
+    await user.keyboard("{Escape}");
+
+    expect(panel().hidden).toBe(false);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Your message" }));
+  });
+
+  it("does nothing on Escape while closed, and does not move focus", async () => {
+    const user = userEvent.setup();
+    await signedInApp();
+    trigger().focus();
+
+    await user.keyboard("{Escape}");
+
+    expect(panel().hidden).toBe(true);
+    expect(document.activeElement).toBe(trigger());
+  });
+
+  it("opens again after closing, moving focus into the panel each time", async () => {
+    const user = userEvent.setup();
+    await signedInApp();
+
+    for (let round = 0; round < 3; round += 1) {
+      await user.click(trigger());
+      expect(panel().hidden).toBe(false);
+      expect(panel().contains(document.activeElement)).toBe(true);
+      await user.keyboard("{Escape}");
+      expect(panel().hidden).toBe(true);
+      expect(document.activeElement).toBe(trigger());
+    }
+  });
+
+  it("keeps an issued Telegram link, the very same element, across closing and reopening", async () => {
+    const user = userEvent.setup();
+    await signedInApp({
+      other: (call) => (call.url === "/api/link/telegram/start" ? jsonResponse(200, ACCOUNT_LINK_RESPONSE) : jsonResponse(599, {})),
+    });
+    await openSettings();
+    await user.click(screen.getByRole("button", { name: "Link Telegram" }));
+    const link = await screen.findByRole("link", { name: "Open Telegram" });
+
+    await user.keyboard("{Escape}");
+    expect(panel().hidden).toBe(true);
+    expect(link.isConnected).toBe(true);
+    expect(panel().contains(link)).toBe(true);
+    expect(screen.queryByRole("link", { name: "Open Telegram" })).toBeNull();
+
+    await user.click(trigger());
+    expect(screen.getByRole("link", { name: "Open Telegram" })).toBe(link);
+    expect(link.getAttribute("href")).toBe(ACCOUNT_LINK_RESPONSE.deep_link);
+  });
+
+  it("does not disturb an account operation in flight when the panel is closed, and shows its result when reopened", async () => {
+    const user = userEvent.setup();
+    const gate = deferred<Response>();
+    const { calls } = await signedInApp({
+      other: (call) => (call.url === "/api/link/telegram/start" ? gate.promise : jsonResponse(599, {})),
+    });
+    await openSettings();
+    await user.click(screen.getByRole("button", { name: "Link Telegram" }));
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Sign out" }).disabled).toBe(true);
+
+    await user.keyboard("{Escape}");
+    expect(panel().hidden).toBe(true);
+    // Still pending, still guarding sign-out, while the panel is out of sight.
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Sign out" }).disabled).toBe(true);
+
+    await settle(gate, jsonResponse(200, ACCOUNT_LINK_RESPONSE));
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "Sign out" }).disabled).toBe(false));
+    await user.click(trigger());
+
+    expect(screen.getByRole("link", { name: "Open Telegram" }).getAttribute("href")).toBe(ACCOUNT_LINK_RESPONSE.deep_link);
+    expect(calls.filter((call) => call.url === "/api/link/telegram/start")).toHaveLength(1);
+  });
+
+  it("loads Settings once, when the shell mounts, however often the panel is opened and closed", async () => {
+    const user = userEvent.setup();
+    const { calls } = await signedInApp({ settings: () => jsonResponse(200, { mode: "rag" }) });
+
+    for (let round = 0; round < 3; round += 1) {
+      await user.click(trigger());
+      await user.keyboard("{Escape}");
+    }
+    await user.click(trigger());
+
+    await waitFor(() =>
+      expect(within(panel()).getByRole<HTMLSelectElement>("combobox", { name: "Preferred mode" }).value).toBe("rag"),
+    );
+    expect(calls.filter((call) => call.url === "/api/settings")).toHaveLength(1);
+    expect(calls.filter((call) => call.url.startsWith("/api/documents"))).toHaveLength(1);
+  });
+
+  it("goes away with the rest of the shell when the session ends, open or closed", async () => {
+    const user = userEvent.setup();
+    await signedInApp({ logout: () => noContentResponse() });
+    await user.click(trigger());
+
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+
+    expect(await screen.findByRole("link", { name: "Sign in with GitHub" })).toBeTruthy();
+    expect(screen.queryByRole("complementary", { hidden: true })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
+  });
+});
+
+describe("interface language", () => {
+  const languageGroup = () => screen.getByRole("group", { name: /^(Language|Язык)$/ });
+  const pressedLanguages = () =>
+    within(languageGroup())
+      .getAllByRole("button")
+      .filter((button) => button.getAttribute("aria-pressed") === "true")
+      .map((button) => button.textContent);
+  const setBrowserLanguages = (languages: string[]) =>
+    vi.spyOn(window.navigator, "languages", "get").mockReturnValue(languages);
+  const anonymousApp = () => backend({ me: () => jsonResponse(401, { detail: "Not authenticated" }) });
+  const storeLocale = (value: string) => localStorage.setItem(LOCALE_STORAGE_KEY, value);
+  const storedKeys = () => Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index));
+
+  describe("switcher", () => {
+    it("is on the loading screen", async () => {
+      const gate = deferred<Response>();
+      backend({ me: () => gate.promise });
+      renderApp();
+
+      expect(screen.getByRole("status")).toBeTruthy();
+      expect(pressedLanguages()).toEqual(["English"]);
+      expect(within(screen.getByRole("status")).queryByRole("button")).toBeNull();
+      await settle(gate, jsonResponse(401, { detail: "Not authenticated" }));
+    });
+
+    it("is on the sign-in screen", async () => {
+      anonymousApp();
+      renderApp();
+      await screen.findByRole("link", { name: "Sign in with GitHub" });
+
+      expect(pressedLanguages()).toEqual(["English"]);
+      expect(within(languageGroup()).getAllByRole("button").map((button) => button.textContent)).toEqual([
+        "English",
+        "Русский",
+      ]);
+    });
+
+    it("is on the verification-error screen", async () => {
+      backend({ me: networkDown });
+      renderApp();
+      await screen.findByRole("button", { name: "Try again" });
+
+      expect(pressedLanguages()).toEqual(["English"]);
+    });
+
+    it("is in the authenticated shell", async () => {
+      await signedInApp();
+
+      expect(pressedLanguages()).toEqual(["English"]);
+      expect(within(screen.getByRole("banner")).getByRole("group", { name: "Language" })).toBe(languageGroup());
+    });
+
+    it("names each language in itself, tagged with its own language", async () => {
+      anonymousApp();
+      renderApp();
+      await screen.findByRole("link", { name: "Sign in with GitHub" });
+
+      expect(screen.getByRole("button", { name: "English" }).getAttribute("lang")).toBe("en");
+      expect(screen.getByRole("button", { name: "Русский" }).getAttribute("lang")).toBe("ru");
+    });
+  });
+
+  describe("Russian", () => {
+    it("renders the loading screen", async () => {
+      storeLocale("ru");
+      const gate = deferred<Response>();
+      backend({ me: () => gate.promise });
+      renderApp();
+
+      expect(screen.getByRole("status").textContent).toContain("Проверяем вашу сессию");
+      expect(screen.getByRole("group", { name: "Язык" })).toBeTruthy();
+      expect(document.body.textContent).not.toContain("Checking your session");
+      await settle(gate, jsonResponse(401, { detail: "Not authenticated" }));
+    });
+
+    it("renders the sign-in screen, with the same plain link to the backend", async () => {
+      storeLocale("ru");
+      anonymousApp();
+      renderApp();
+
+      const link = await screen.findByRole("link", { name: "Войти через GitHub" });
+      expect(link.tagName).toBe("A");
+      expect(link.getAttribute("href")).toBe("/api/auth/github/login");
+      expect(link.getAttribute("target")).toBeNull();
+      expect(screen.getByRole("heading", { level: 1, name: "Multimodal Learning Assistant" })).toBeTruthy();
+      expect(screen.getByText("Чтобы продолжить, нужно войти.")).toBeTruthy();
+      expect(document.body.textContent).not.toContain("Sign in with GitHub");
+      expect(pressedLanguages()).toEqual(["Русский"]);
+    });
+
+    it("does not hijack the sign-in link's click either", async () => {
+      storeLocale("ru");
+      const user = userEvent.setup();
+      const { calls } = anonymousApp();
+      renderApp();
+      const link = await screen.findByRole("link", { name: "Войти через GitHub" });
+
+      const seen: boolean[] = [];
+      const observer = (event: MouseEvent) => {
+        seen.push(event.defaultPrevented);
+        event.preventDefault();
+      };
+      document.addEventListener("click", observer);
+      await user.click(link);
+      document.removeEventListener("click", observer);
+
+      expect(seen).toEqual([false]);
+      expect(calls.map((call) => call.url)).toEqual(["/api/me"]);
+    });
+
+    it("renders the verification-error screen, its fixed message translated, without saying the user is signed out", async () => {
+      storeLocale("ru");
+      backend({ me: networkDown });
+      renderApp();
+
+      expect(await screen.findByRole("heading", { name: "Не удалось проверить вашу сессию" })).toBeTruthy();
+      const alert = screen.getByRole("alert");
+      expect(alert.textContent).toContain("Вы не вышли из аккаунта");
+      expect(alert.textContent).toContain("Не удаётся связаться с сервером");
+      expect(alert.textContent).not.toContain(NETWORK_ERROR_DETAIL);
+      expect(screen.getByRole("button", { name: "Повторить" })).toBeTruthy();
+      expect(screen.queryByRole("link", { name: /войти/i })).toBeNull();
+    });
+
+    it.each([
+      [403, "Сервер отклонил запрос"],
+      [429, "Слишком много запросов"],
+      [500, "На сервере возникла проблема"],
+    ])("translates the fixed message for HTTP %i on the verification-error screen", async (status, expected) => {
+      storeLocale("ru");
+      backend({ me: () => jsonResponse(status, { detail: "backend prose" }) });
+      renderApp();
+
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toContain(expected);
+      expect(alert.textContent).not.toContain("backend prose");
+    });
+
+    it("renders the authenticated shell and the chat", async () => {
+      storeLocale("ru");
+      const user = userEvent.setup();
+      await signedInApp();
+
+      expect(screen.getByRole("heading", { level: 1, name: "Вы вошли в систему" })).toBeTruthy();
+      const header = within(screen.getByRole("banner"));
+      expect(header.getByText("Multimodal Learning Assistant")).toBeTruthy();
+      expect(header.getByRole("button", { name: "Выйти" })).toBeTruthy();
+      expect(header.getByRole("button", { name: "Настройки" })).toBeTruthy();
+      expect(header.getByRole("group", { name: "Язык" })).toBeTruthy();
+      const chat = within(screen.getByRole("region", { name: "Спросите ассистента" }));
+      expect(chat.getByRole("log", { name: "Переписка" })).toBeTruthy();
+      expect(chat.getByText("Задайте вопрос, чтобы начать.")).toBeTruthy();
+      expect(chat.getByRole("textbox", { name: "Ваше сообщение" })).toBeTruthy();
+      expect(chat.getByRole("button", { name: "Отправить" })).toBeTruthy();
+      expect(chat.getByText(/Enter — отправить/)).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Sign out" })).toBeNull();
+      expect(document.body.textContent).not.toContain("Ask the assistant");
+
+      await user.click(header.getByRole("button", { name: "Настройки" }));
+      const panel = within(screen.getByRole("complementary", { name: "Аккаунт и настройки" }));
+      expect(panel.getByText("Дата регистрации")).toBeTruthy();
+      expect(panel.getByText(/января 2026/)).toBeTruthy();
+      expect(panel.getByRole("button", { name: "Закрыть" })).toBeTruthy();
+    });
+
+    it("renders a failed sign-out in Russian, keeping the fixed message and hiding the backend's", async () => {
+      storeLocale("ru");
+      const user = userEvent.setup();
+      await signedInApp({ logout: () => jsonResponse(500, { detail: SENSITIVE_DETAILS[0] }) });
+
+      await user.click(screen.getByRole("button", { name: "Выйти" }));
+
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toContain("Не удалось подтвердить выход");
+      expect(alert.textContent).toContain("На сервере возникла проблема");
+      expect(document.documentElement.outerHTML).not.toContain(SENSITIVE_DETAILS[0]);
+    });
+
+    it("renders a chat failure and the sending state in Russian", async () => {
+      storeLocale("ru");
+      const user = userEvent.setup();
+      const gate = deferred<Response>();
+      await signedInApp({ other: (call) => (call.url === "/api/chat" ? gate.promise : jsonResponse(599, {})) });
+      await user.click(screen.getByRole("textbox", { name: "Ваше сообщение" }));
+      await user.paste("Привет");
+
+      await user.click(screen.getByRole("button", { name: "Отправить" }));
+
+      expect(screen.getByRole("status").textContent).toContain("Ждём ответ");
+      expect(screen.getByRole("button", { name: "Отправляем…" })).toBeTruthy();
+      await settle(gate, jsonResponse(500, { detail: "boom" }));
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toContain("Ваше сообщение не добавлено в переписку");
+      expect(alert.textContent).toContain("На сервере возникла проблема");
+    });
+  });
+
+  describe("switching", () => {
+    it("updates the visible text, <html lang> and the title, both ways", async () => {
+      const user = userEvent.setup();
+      anonymousApp();
+      renderApp();
+      await screen.findByRole("link", { name: "Sign in with GitHub" });
+      expect(document.documentElement.lang).toBe("en");
+      expect(document.title).toBe("Sign in — Multimodal Learning Assistant");
+
+      await user.click(screen.getByRole("button", { name: "Русский" }));
+
+      expect(screen.getByRole("link", { name: "Войти через GitHub" })).toBeTruthy();
+      expect(screen.queryByRole("link", { name: "Sign in with GitHub" })).toBeNull();
+      expect(document.documentElement.lang).toBe("ru");
+      expect(document.title).toBe("Вход — Multimodal Learning Assistant");
+      expect(pressedLanguages()).toEqual(["Русский"]);
+
+      await user.click(screen.getByRole("button", { name: "English" }));
+
+      expect(screen.getByRole("link", { name: "Sign in with GitHub" })).toBeTruthy();
+      expect(document.documentElement.lang).toBe("en");
+      expect(document.title).toBe("Sign in — Multimodal Learning Assistant");
+      expect(pressedLanguages()).toEqual(["English"]);
+    });
+
+    it("switches the verification-error screen without another request, and retranslates its message", async () => {
+      const user = userEvent.setup();
+      const { calls } = backend({ me: networkDown });
+      renderApp();
+      await screen.findByRole("button", { name: "Try again" });
+      expect(document.title).toBe("Can’t verify your session — Multimodal Learning Assistant");
+
+      await user.click(screen.getByRole("button", { name: "Русский" }));
+
+      expect(screen.getByRole("heading", { name: "Не удалось проверить вашу сессию" })).toBeTruthy();
+      expect(screen.getByText(/Не удаётся связаться с сервером/)).toBeTruthy();
+      expect(document.title).toBe("Не удалось проверить сессию — Multimodal Learning Assistant");
+      expect(calls).toHaveLength(1);
+    });
+
+    it("titles the loading and signed-in screens with the product name alone, in either language", async () => {
+      const user = userEvent.setup();
+      const gate = deferred<Response>();
+      backend({ me: () => gate.promise, logout: () => noContentResponse() });
+      renderApp();
+      expect(document.title).toBe("Multimodal Learning Assistant");
+
+      await user.click(screen.getByRole("button", { name: "Русский" }));
+      expect(document.title).toBe("Multimodal Learning Assistant");
+
+      await settle(gate, jsonResponse(200, SAMPLE_USER));
+      await screen.findByRole("heading", { name: "Вы вошли в систему" });
+      expect(document.title).toBe("Multimodal Learning Assistant");
+      expect(document.documentElement.lang).toBe("ru");
+    });
+
+    it("switches the signed-in shell in place: same elements, same draft, same open panel, no requests", async () => {
+      const user = userEvent.setup();
+      const { calls } = await signedInApp({
+        other: (call) => (call.url === "/api/link/telegram/start" ? jsonResponse(200, ACCOUNT_LINK_RESPONSE) : jsonResponse(599, {})),
+      });
+      await openSettings();
+      await user.click(screen.getByRole("button", { name: "Link Telegram" }));
+      const link = await screen.findByRole("link", { name: "Open Telegram" });
+      const composer = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Your message" });
+      await user.click(composer);
+      await user.paste("half-written thought");
+      const requestsBefore = calls.length;
+
+      await user.click(screen.getByRole("button", { name: "Русский" }));
+
+      // Nothing was remounted: not the composer (and its draft), not the issued link, not the panel.
+      expect(screen.getByRole("textbox", { name: "Ваше сообщение" })).toBe(composer);
+      expect(composer.value).toBe("half-written thought");
+      expect(screen.getByRole("link", { name: "Open Telegram" })).toBe(link);
+      expect(screen.getByRole("button", { name: "Настройки" }).getAttribute("aria-expanded")).toBe("true");
+      expect(calls).toHaveLength(requestsBefore);
+    });
+
+    it("retranslates a chat error that is already on screen", async () => {
+      const user = userEvent.setup();
+      await signedInApp({ other: networkDown });
+      await user.click(screen.getByRole("textbox", { name: "Your message" }));
+      await user.paste("hello");
+      await user.click(screen.getByRole("button", { name: "Send" }));
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toContain("wasn’t added to the conversation");
+      expect(alert.textContent).toContain(NETWORK_ERROR_DETAIL);
+
+      await user.click(screen.getByRole("button", { name: "Русский" }));
+
+      expect(alert.textContent).toContain("Ваше сообщение не добавлено в переписку");
+      expect(alert.textContent).toContain("Не удаётся связаться с сервером");
+      expect(alert.textContent).not.toContain(NETWORK_ERROR_DETAIL);
+    });
+
+    it("formats the member-since date in the chosen language", async () => {
+      const user = userEvent.setup();
+      await signedInApp();
+      await openSettings();
+      const panel = () => within(screen.getByRole("complementary", { name: "Account and settings" }));
+      expect(panel().getByText(/January 1[456], 2026/)).toBeTruthy();
+
+      await user.click(screen.getByRole("button", { name: "Русский" }));
+
+      expect(within(screen.getByRole("complementary", { name: "Аккаунт и настройки" })).getByText(/января 2026/)).toBeTruthy();
+    });
+  });
+
+  describe("persistence", () => {
+    it("writes nothing to storage or cookies until the user switches", async () => {
+      document.cookie = "csrf_token=dev-csrf; Path=/";
+      const setItem = vi.spyOn(Storage.prototype, "setItem");
+      const cookieWrites = vi.spyOn(document, "cookie", "set");
+      setBrowserLanguages(["ru-RU"]);
+      anonymousApp();
+
+      renderApp();
+      await screen.findByRole("link", { name: "Войти через GitHub" });
+
+      // Detected from the browser, not stored.
+      expect(setItem).not.toHaveBeenCalled();
+      expect(cookieWrites).not.toHaveBeenCalled();
+      expect(localStorage.length).toBe(0);
+      expect(sessionStorage.length).toBe(0);
+    });
+
+    it("writes exactly the approved locale key, and nothing else, when the user switches", async () => {
+      const setItem = vi.spyOn(Storage.prototype, "setItem");
+      const removeItem = vi.spyOn(Storage.prototype, "removeItem");
+      const cookieWrites = vi.spyOn(document, "cookie", "set");
+      const user = userEvent.setup();
+      anonymousApp();
+      renderApp();
+      await screen.findByRole("link", { name: "Sign in with GitHub" });
+
+      await user.click(screen.getByRole("button", { name: "Русский" }));
+      await user.click(screen.getByRole("button", { name: "English" }));
+      await user.click(screen.getByRole("button", { name: "Русский" }));
+
+      expect(setItem.mock.calls).toEqual([
+        [LOCALE_STORAGE_KEY, "ru"],
+        [LOCALE_STORAGE_KEY, "en"],
+        [LOCALE_STORAGE_KEY, "ru"],
+      ]);
+      expect(removeItem).not.toHaveBeenCalled();
+      expect(cookieWrites).not.toHaveBeenCalled();
+      expect(localStorage.length).toBe(1);
+      expect(storedKeys()).toEqual([LOCALE_STORAGE_KEY]);
+      expect(localStorage.getItem(LOCALE_STORAGE_KEY)).toBe("ru");
+      expect(sessionStorage.length).toBe(0);
+    });
+
+    it("stores no session, user, chat or document data even after a busy signed-in session in Russian", async () => {
+      document.cookie = "csrf_token=dev-csrf; Path=/";
+      const user = userEvent.setup();
+      await signedInApp({
+        other: (call) => (call.url === "/api/chat" ? jsonResponse(200, { text: "Ответ" }) : jsonResponse(599, {})),
+        logout: () => noContentResponse(),
+      });
+      await user.click(screen.getByRole("button", { name: "Русский" }));
+      await user.click(screen.getByRole("textbox", { name: "Ваше сообщение" }));
+      await user.paste("Секретный вопрос");
+      await user.click(screen.getByRole("button", { name: "Отправить" }));
+      await within(screen.getByRole("log", { name: "Переписка" })).findByText("Ответ");
+      await user.click(screen.getByRole("button", { name: "Выйти" }));
+      await screen.findByRole("link", { name: "Войти через GitHub" });
+
+      expect(storedKeys()).toEqual([LOCALE_STORAGE_KEY]);
+      expect(localStorage.getItem(LOCALE_STORAGE_KEY)).toBe("ru");
+      expect(sessionStorage.length).toBe(0);
+    });
+
+    it("remembers the choice for the next visit, across a sign-out too", async () => {
+      const user = userEvent.setup();
+      anonymousApp();
+      const first = renderApp();
+      await screen.findByRole("link", { name: "Sign in with GitHub" });
+      await user.click(screen.getByRole("button", { name: "Русский" }));
+      first.unmount();
+
+      anonymousApp();
+      renderApp();
+
+      expect(await screen.findByRole("link", { name: "Войти через GitHub" })).toBeTruthy();
+      expect(document.documentElement.lang).toBe("ru");
+    });
+
+    it("prefers a stored choice over the browser's language", async () => {
+      storeLocale("en");
+      setBrowserLanguages(["ru-RU", "en-US"]);
+      anonymousApp();
+
+      renderApp();
+
+      expect(await screen.findByRole("link", { name: "Sign in with GitHub" })).toBeTruthy();
+      expect(document.documentElement.lang).toBe("en");
+    });
+
+    it.each(["de", "EN", "ru ", "", "null", '{"locale":"ru"}', "русский"])(
+      "ignores the invalid stored value %j and uses the browser's language",
+      async (invalid) => {
+        storeLocale(invalid);
+        setBrowserLanguages(["ru-RU", "en-US"]);
+        anonymousApp();
+
+        renderApp();
+
+        expect(await screen.findByRole("link", { name: "Войти через GitHub" })).toBeTruthy();
+        expect(document.documentElement.lang).toBe("ru");
+      },
+    );
+
+    it("uses the first supported browser language, by primary subtag, and English when there is none", async () => {
+      setBrowserLanguages(["de-DE", "ru", "en"]);
+      anonymousApp();
+      const first = renderApp();
+      expect(await screen.findByRole("link", { name: "Войти через GitHub" })).toBeTruthy();
+      first.unmount();
+
+      setBrowserLanguages(["de-DE", "fr"]);
+      anonymousApp();
+      renderApp();
+      expect(await screen.findByRole("link", { name: "Sign in with GitHub" })).toBeTruthy();
+      expect(document.documentElement.lang).toBe("en");
+    });
+
+    it("still works, in memory, when storage is unavailable", async () => {
+      vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+        throw new DOMException("blocked", "SecurityError");
+      });
+      vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new DOMException("blocked", "SecurityError");
+      });
+      const user = userEvent.setup();
+      anonymousApp();
+      renderApp();
+      await screen.findByRole("link", { name: "Sign in with GitHub" });
+
+      await user.click(screen.getByRole("button", { name: "Русский" }));
+
+      expect(screen.getByRole("link", { name: "Войти через GitHub" })).toBeTruthy();
+      expect(document.documentElement.lang).toBe("ru");
+    });
   });
 });
 
