@@ -12,7 +12,10 @@ import {
 import { TUTOR_MODES, type TutorMode } from "../api/types";
 import { AuthProvider } from "../auth/AuthContext";
 import { useAuth } from "../auth/useAuth";
+import { I18nProvider } from "../i18n/I18nProvider";
+import { LOCALE_STORAGE_KEY } from "../i18n/storage";
 import { SAMPLE_USER, SENSITIVE_DETAILS, deferred, jsonResponse, mockFetch, type RecordedCall } from "../test/http";
+import { LanguageSwitcher } from "./LanguageSwitcher";
 import { SettingsPanel } from "./SettingsPanel";
 
 type Handler = (call: RecordedCall) => Response | Promise<Response>;
@@ -648,5 +651,140 @@ describe("browser persistence", () => {
     expect(cookieWrites).not.toHaveBeenCalled();
     expect(localStorage.length).toBe(0);
     expect(sessionStorage.length).toBe(0);
+  });
+});
+
+describe("in Russian", () => {
+  // The panel has exactly one combobox regardless of language; `modeSelect()`
+  // above looks it up by its English accessible name and so cannot be used
+  // once the panel is showing Russian.
+  const combobox = () => screen.getByRole<HTMLSelectElement>("combobox");
+
+  function renderRussian(initial: TutorMode, other: { patch?: Handler } = {}) {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    const harness = settingsBackend({ get: () => jsonResponse(200, { mode: initial }), ...other });
+    const view = render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <SettingsPanel />
+      </I18nProvider>,
+    );
+    return { ...harness, ...view };
+  }
+
+  it("shows the panel, the mode options, and the note in Russian", async () => {
+    renderRussian("rag");
+    await waitFor(() => expect(combobox().disabled).toBe(false));
+
+    expect(screen.getByRole("heading", { name: "Настройки" })).toBeTruthy();
+    expect(screen.getByText(/общий с Telegram/)).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Предпочитаемый режим" })).toBeTruthy();
+    expect(
+      within(combobox())
+        .getAllByRole<HTMLOptionElement>("option")
+        .map((option) => [option.value, option.textContent]),
+    ).toEqual([
+      ["text", "Текст"],
+      ["voice", "Голос"],
+      ["vision", "Изображения"],
+      ["rag", "База знаний"],
+    ]);
+    expect(screen.getByRole("button", { name: "Сохранить" })).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/Settings|Preferred mode|Save\b/);
+  });
+
+  it("saves and reports success in Russian, sending the same request as in English", async () => {
+    const user = userEvent.setup();
+    const { patches } = renderRussian("text", { patch: () => jsonResponse(200, { mode: "vision" }) });
+    await waitFor(() => expect(combobox().disabled).toBe(false));
+
+    await user.selectOptions(combobox(), "vision");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    await screen.findByText("Настройка сохранена.");
+    expect(bodyOf(patches()[0])).toBe('{"mode":"vision"}');
+  });
+
+  it("shows only client-owned error text in Russian on a save failure, translated rather than the fixed English detail", async () => {
+    const user = userEvent.setup();
+    renderRussian("text", { patch: () => jsonResponse(503, { detail: "boom" }) });
+    await waitFor(() => expect(combobox().disabled).toBe(false));
+
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Не удалось сохранить вашу настройку.");
+    expect(alert.textContent).toContain("На сервере возникла проблема");
+    expect(alert.textContent).not.toContain(SERVER_ERROR_DETAIL);
+    expect(alert.textContent).not.toContain("boom");
+  });
+
+  it("switches the already-visible panel's language without any new request", async () => {
+    const user = userEvent.setup();
+    const { gets } = settingsBackend({ get: () => jsonResponse(200, { mode: "text" }) });
+    render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <SettingsPanel />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(modeSelect().disabled).toBe(false));
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Русский" }));
+
+    expect(screen.getByRole("heading", { name: "Настройки" })).toBeTruthy();
+    expect(combobox().value).toBe("text");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(gets()).toHaveLength(1);
+  });
+
+  it("retranslates a visible saved-preference notice after switching locale, with no new request", async () => {
+    const user = userEvent.setup();
+    const { gets, patches } = settingsBackend({
+      get: () => jsonResponse(200, { mode: "text" }),
+      patch: () => jsonResponse(200, { mode: "text" }),
+    });
+    render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <SettingsPanel />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(modeSelect().disabled).toBe(false));
+    await user.click(saveButton());
+    await screen.findByText("Preference saved.");
+
+    await user.click(screen.getByRole("button", { name: "Русский" }));
+
+    expect(screen.getByText("Настройка сохранена.")).toBeTruthy();
+    expect(screen.queryByText("Preference saved.")).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(gets()).toHaveLength(1);
+    expect(patches()).toHaveLength(1);
+  });
+
+  it("shows a Russian result notice for a save started in English and resolved after the locale switch", async () => {
+    const user = userEvent.setup();
+    const { gate, handler } = held();
+    settingsBackend({ get: () => jsonResponse(200, { mode: "text" }), patch: handler });
+    render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <SettingsPanel />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(modeSelect().disabled).toBe(false));
+
+    await user.click(saveButton());
+    expect(saveButton().textContent).toBe("Saving…");
+
+    await user.click(screen.getByRole("button", { name: "Русский" }));
+    expect(screen.getByRole("button", { name: "Сохраняем…" })).toBeTruthy();
+
+    await settle(gate, jsonResponse(200, { mode: "text" }));
+
+    expect(await screen.findByText("Настройка сохранена.")).toBeTruthy();
+    expect(screen.queryByText("Preference saved.")).toBeNull();
   });
 });

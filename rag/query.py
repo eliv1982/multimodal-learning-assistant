@@ -579,18 +579,25 @@ async def _generate_rag_response(
     Returns:
         Generated response
     """
-    system_prompt = """Ты — персональный тьютор по Python с доступом к базе знаний.
+    # Post-Stage-7 Batch 2: generalized from a Python-specific "тьютор по
+    # Python" persona to a domain-neutral learning assistant with knowledge-
+    # base access (the knowledge base itself may hold Python-specific
+    # reference material or a user's own documents on any subject — this
+    # prompt makes no assumption either way), and the language instruction
+    # changed from an unconditional "answer in Russian" to following the
+    # user's own language.
+    system_prompt = """You are a knowledgeable learning assistant with access to a knowledge base.
 
-ПРАВИЛА:
-1. Отвечай на основе предоставленного контекста.
-2. Если в контексте есть ответ — используй его.
-3. Если ответа нет — честно скажи и ответь из общих знаний по Python.
-4. Отвечай на русском, чётко и по делу. Не используй разметку markdown — только обычный текст. Примеры кода пиши с отступом, без звёздочек и обратных кавычек.
+RULES:
+1. Answer based on the provided context when it is relevant.
+2. If the context contains the answer, use it.
+3. If it does not, say so honestly and answer from general knowledge.
+4. Reply in the language the user is writing in; if their language is unclear, match the language of the current conversation. Do not use markdown formatting — plain text only. Write code examples with indentation, never with asterisks or backticks.
 
-КОНТЕКСТ ИЗ БАЗЫ ЗНАНИЙ:
+CONTEXT FROM THE KNOWLEDGE BASE:
 {context}
 
-Ответь на вопрос пользователя, опираясь на контекст выше."""
+Answer the user's question, drawing on the context above."""
     
     # Prepare messages
     messages = [
@@ -637,9 +644,11 @@ async def _fallback_response(
     """
     logger.debug("RAG fallback_response (no context)")
     
+    # Post-Stage-7 Batch 2: same generalization as _generate_rag_response()'s
+    # system_prompt above — domain-neutral persona, language follows the user.
     system_message = {
         "role": "system",
-        "content": """Ты — личный тьютор по Python. База знаний пуста или не содержит ответа. Ответь на основе общих знаний и предупреди, что это не из базы знаний. Не используй markdown — только обычный текст."""
+        "content": """You are a learning assistant. The knowledge base is empty or does not contain the answer. Answer from general knowledge and mention that this is not from the knowledge base. Reply in the language the user is writing in; if their language is unclear, match the language of the current conversation. Do not use markdown — plain text only."""
     }
     
     messages = [system_message]

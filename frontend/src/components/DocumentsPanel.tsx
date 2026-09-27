@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 
-import { TIMEOUT_ERROR_DETAIL, isUnauthorized, toApiError } from "../api/client";
+import { ApiError, TIMEOUT_ERROR_DETAIL, isUnauthorized, toApiError } from "../api/client";
 import {
   DOCUMENTS_PAGE_SIZE,
   MAX_FILENAME_CODE_POINTS,
@@ -14,8 +14,46 @@ import {
   type UploadFileProblem,
 } from "../api/documents";
 import type { DocumentSummary } from "../api/types";
+import { apiErrorMessage } from "../i18n/apiErrors";
+import type { Locale } from "../i18n/locale";
+import type { Translate } from "../i18n/translate";
+import { useI18n } from "../i18n/useI18n";
 
-type Notice = { kind: "status" | "error"; text: string };
+/**
+ * Semantic classification of an upload/delete failure: never rendered text.
+ * Only the "generic" case carries data (the client-owned `ApiError`, whose
+ * `detail` is translated through the shared `apiErrorMessage` mapping); every
+ * other case needs no data of its own, so a message is derived from the tag
+ * alone at render time, in whatever locale is then current.
+ */
+type UploadFailureReason =
+  | "timed-out"
+  | "unconfirmed"
+  | "too-large-for-server"
+  | "not-accepted"
+  | "unavailable"
+  | "server-failure"
+  | { kind: "generic"; error: ApiError };
+
+type DeleteFailureReason =
+  | "unconfirmed"
+  | "not-found"
+  | "unavailable"
+  | "server-failure"
+  | { kind: "generic"; error: ApiError };
+
+/**
+ * What is shown below the upload form: a semantic outcome, not rendered text.
+ * `name` is the server's `display_name`, kept as data so it interpolates into
+ * whichever language's template is current, never baked into a string ahead
+ * of time.
+ */
+type Notice =
+  | { kind: "uploaded"; name: string }
+  | { kind: "deleted"; name: string }
+  | { kind: "upload-failed"; reason: UploadFailureReason }
+  | { kind: "delete-failed"; reason: DeleteFailureReason };
+
 type Mutation = { kind: "upload" } | { kind: "delete"; id: string };
 
 /** What the list shows. `page` and `nonce` are the only inputs of the list read; the rest is its latest result. */
@@ -26,28 +64,52 @@ interface ListView {
   items: DocumentSummary[];
   hasNext: boolean;
   status: "loading" | "ready" | "failed";
-  error: string | null;
+  error: ApiError | null;
 }
 
 const MIB = 1024 * 1024;
+const MAX_UPLOAD_MIB = MAX_UPLOAD_BYTES / MIB;
 
-const FILE_PROBLEM_TEXT: Record<UploadFileProblem, string> = {
-  extension: "Only PDF, TXT, MD and DOCX files can be uploaded.",
-  empty: "This file is empty.",
-  "too-large": `This file is larger than the ${MAX_UPLOAD_BYTES / MIB} MiB limit.`,
-  "name-too-long": `This file’s name is longer than ${MAX_FILENAME_CODE_POINTS} characters.`,
-};
-
-const UNAVAILABLE = "Document storage is unavailable right now. Please try again later.";
-const UPLOAD_TIMED_OUT =
-  "The upload took too long, so we can’t tell whether it finished. Use Refresh to check your documents before uploading again.";
-const UPLOAD_UNCONFIRMED =
-  "We couldn’t confirm whether the upload finished. Use Refresh to check your documents before uploading again.";
-const DELETE_UNCONFIRMED = "We couldn’t confirm whether the document was deleted. Use Refresh to check the list.";
-
-const uploadedAtInstant = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+function fileProblemText(problem: UploadFileProblem, t: Translate): string {
+  switch (problem) {
+    case "extension":
+      return t("documents.problemExtension");
+    case "empty":
+      return t("documents.problemEmpty");
+    case "too-large":
+      return t("documents.problemTooLarge", { max: MAX_UPLOAD_MIB });
+    case "name-too-long":
+      return t("documents.problemNameTooLong", { max: MAX_FILENAME_CODE_POINTS });
+  }
+}
 
 const HAS_UTC_OFFSET = /(?:Z|[+-]\d{2}:\d{2})$/;
+const OFFSET_LESS_WALL_CLOCK = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/;
+
+/**
+ * Formats an offset-less wall-clock reading in the given locale, without ever
+ * letting the machine's time zone shift the digits.
+ *
+ * The year/month/day/hour/minute are parsed out of the string deterministically
+ * (never through `Date` parsing, which is locale- and implementation-defined)
+ * and handed to `Date.UTC`, which only does calendar arithmetic on the values
+ * given it — UTC has no DST, so no wall-clock reading is ever skipped or
+ * repeated. `Intl.DateTimeFormat` is then pinned to `timeZone: "UTC"` too, so
+ * it reads back exactly the components that went in, regardless of the
+ * browser's real zone, and renders them with the selected locale's date/time
+ * conventions.
+ */
+function formatOffsetLessWallClock(value: string, locale: Locale): string {
+  const match = OFFSET_LESS_WALL_CLOCK.exec(value);
+  if (match === null) {
+    // Defensive only: every caller already validated the shape (see documents.ts).
+    return value.slice(0, "YYYY-MM-DDTHH:MM".length).replace("T", " ");
+  }
+  const wallClockMillis = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]));
+  return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }).format(
+    wallClockMillis,
+  );
+}
 
 /**
  * How a document's `created_at` is shown.
@@ -56,18 +118,21 @@ const HAS_UTC_OFFSET = /(?:Z|[+-]\d{2}:\d{2})$/;
  * offset and names no instant: parsing it with `Date` would give it the
  * browser's zone, and a wall-clock time that zone skips (a DST gap, such as
  * 2026-03-08T02:30:00 in America/New_York) would be shifted to a different
- * hour. Such a value is therefore shown as the wall-clock digits the server
- * sent ("2026-03-08 02:30"), with no zone assumed and no conversion. A value
- * with "Z" or a numeric offset does name an instant, and is shown in the
- * browser's locale and zone.
+ * hour. Such a value is therefore shown as its own wall-clock digits,
+ * formatted for the selected interface locale but never shifted by the
+ * browser's zone (see `formatOffsetLessWallClock`). A value with "Z" or a
+ * numeric offset does name an instant, and is shown in the given interface
+ * locale and the browser's zone.
  *
  * `value` must already be a validated server timestamp (see `documents.ts`).
  */
-export function formatDocumentCreatedAt(value: string): string {
+export function formatDocumentCreatedAt(value: string, locale: Locale): string {
   if (HAS_UTC_OFFSET.test(value)) {
-    return uploadedAtInstant.format(new Date(normalizeTimestamp(value)));
+    return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(
+      new Date(normalizeTimestamp(value)),
+    );
   }
-  return value.slice(0, "YYYY-MM-DDTHH:MM".length).replace("T", " ");
+  return formatOffsetLessWallClock(value, locale);
 }
 
 function formatSize(bytes: number): string {
@@ -85,45 +150,103 @@ function isUnconfirmed(status: number): boolean {
   return status === 0 || (status >= 200 && status < 300);
 }
 
-/** Client-owned wording only: nothing from the response body ever reaches this. */
-function uploadFailureText(error: unknown): string {
-  const { status, detail } = toApiError(error);
+/**
+ * Classifies an upload failure into a semantic reason, never rendered text:
+ * nothing from the response body ever reaches this or anything derived from it.
+ */
+function classifyUploadFailure(error: unknown): UploadFailureReason {
+  const apiError = toApiError(error);
+  const { status, detail } = apiError;
   if (status === 0) {
-    return detail === TIMEOUT_ERROR_DETAIL ? UPLOAD_TIMED_OUT : UPLOAD_UNCONFIRMED;
+    return detail === TIMEOUT_ERROR_DETAIL ? "timed-out" : "unconfirmed";
   }
   if (isUnconfirmed(status)) {
-    return UPLOAD_UNCONFIRMED;
+    return "unconfirmed";
   }
   if (status === 413) {
-    return `This file is too large for the server. The limit is ${MAX_UPLOAD_BYTES / MIB} MiB.`;
+    return "too-large-for-server";
   }
   if (status === 422) {
-    return "The server didn’t accept this file. Check that it is a PDF, TXT, MD or DOCX file with an ordinary name.";
+    return "not-accepted";
   }
   if (status === 503) {
-    return UNAVAILABLE;
+    return "unavailable";
   }
   if (status === 500) {
-    return "The server couldn’t process this file. Try again, or try a different file.";
+    return "server-failure";
   }
-  return `Couldn’t upload this file. ${detail}`;
+  return { kind: "generic", error: apiError };
 }
 
-function deleteFailureText(error: unknown): string {
-  const { status, detail } = toApiError(error);
+function uploadFailureMessage(reason: UploadFailureReason, t: Translate): string {
+  if (typeof reason === "object") {
+    return t("documents.uploadGeneric", { detail: apiErrorMessage(reason.error, t) });
+  }
+  switch (reason) {
+    case "timed-out":
+      return t("documents.uploadTimedOut");
+    case "unconfirmed":
+      return t("documents.uploadUnconfirmed");
+    case "too-large-for-server":
+      return t("documents.tooLargeForServer", { max: MAX_UPLOAD_MIB });
+    case "not-accepted":
+      return t("documents.notAccepted");
+    case "unavailable":
+      return t("documents.unavailable");
+    case "server-failure":
+      return t("documents.uploadServerFailure");
+  }
+}
+
+function classifyDeleteFailure(error: unknown): DeleteFailureReason {
+  const apiError = toApiError(error);
+  const { status } = apiError;
   if (isUnconfirmed(status)) {
-    return DELETE_UNCONFIRMED;
+    return "unconfirmed";
   }
   if (status === 404) {
-    return "This document was not found. It may already be deleted; use Refresh to update the list.";
+    return "not-found";
   }
   if (status === 503) {
-    return UNAVAILABLE;
+    return "unavailable";
   }
   if (status === 500) {
-    return "The document couldn’t be fully deleted. It may no longer appear in the list; use Refresh to check before trying again.";
+    return "server-failure";
   }
-  return `Couldn’t delete this document. ${detail}`;
+  return { kind: "generic", error: apiError };
+}
+
+function deleteFailureMessage(reason: DeleteFailureReason, t: Translate): string {
+  if (typeof reason === "object") {
+    return t("documents.deleteGeneric", { detail: apiErrorMessage(reason.error, t) });
+  }
+  switch (reason) {
+    case "unconfirmed":
+      return t("documents.deleteUnconfirmed");
+    case "not-found":
+      return t("documents.deleteNotFound");
+    case "unavailable":
+      return t("documents.unavailable");
+    case "server-failure":
+      return t("documents.deleteServerFailure");
+  }
+}
+
+function noticeMessage(notice: Notice, t: Translate): string {
+  switch (notice.kind) {
+    case "uploaded":
+      return t("documents.uploaded", { name: notice.name });
+    case "deleted":
+      return t("documents.deleted", { name: notice.name });
+    case "upload-failed":
+      return uploadFailureMessage(notice.reason, t);
+    case "delete-failed":
+      return deleteFailureMessage(notice.reason, t);
+  }
+}
+
+function noticeIsError(notice: Notice): boolean {
+  return notice.kind === "upload-failed" || notice.kind === "delete-failed";
 }
 
 interface DocumentsPanelProps {
@@ -157,6 +280,7 @@ interface DocumentsPanelProps {
  * - The chosen `File` lives only in this component's state: no browser storage.
  */
 export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPanelProps) {
+  const { t, locale } = useI18n();
   const [view, setView] = useState<ListView>({
     page: 0,
     nonce: 0,
@@ -168,7 +292,7 @@ export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPa
   const [file, setFile] = useState<File | null>(null);
   const [mutation, setMutation] = useState<Mutation | null>(null);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
-  const [rowError, setRowError] = useState<{ id: string; text: string } | null>(null);
+  const [rowError, setRowError] = useState<{ id: string; reason: DeleteFailureReason } | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
 
   const listRequestId = useRef(0);
@@ -209,7 +333,7 @@ export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPa
         setView((prev) => ({ ...prev, items: result.items, hasNext: result.hasNext, status: "ready", error: null }));
       } catch (error) {
         if (isCurrent() && !isUnauthorized(error)) {
-          setView((prev) => ({ ...prev, status: "failed", error: toApiError(error).detail }));
+          setView((prev) => ({ ...prev, status: "failed", error: toApiError(error) }));
         }
       }
     })();
@@ -305,7 +429,7 @@ export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPa
           invalidateListReads();
           setFile(null);
           setConfirmingId(null);
-          setNotice({ kind: "status", text: `Uploaded “${created.display_name}”.` });
+          setNotice({ kind: "uploaded", name: created.display_name });
           setView((prev) => {
             // Newest first: on the first page the new document leads it; from
             // any other page the list returns to the first page and is read again.
@@ -325,7 +449,7 @@ export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPa
         }
       } catch (error) {
         if (!request.signal.aborted && !isUnauthorized(error)) {
-          setNotice({ kind: "error", text: uploadFailureText(error) });
+          setNotice({ kind: "upload-failed", reason: classifyUploadFailure(error) });
         }
       } finally {
         endMutation(request);
@@ -345,7 +469,7 @@ export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPa
           catalogEpoch.current += 1;
           invalidateListReads();
           setConfirmingId(null);
-          setNotice({ kind: "status", text: `Deleted “${item.display_name}”.` });
+          setNotice({ kind: "deleted", name: item.display_name });
           setView((prev) => ({
             ...prev,
             nonce: prev.nonce + 1,
@@ -356,7 +480,7 @@ export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPa
         }
       } catch (error) {
         if (!request.signal.aborted && !isUnauthorized(error)) {
-          setRowError({ id: item.id, text: deleteFailureText(error) });
+          setRowError({ id: item.id, reason: classifyDeleteFailure(error) });
         }
       } finally {
         endMutation(request);
@@ -381,21 +505,17 @@ export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPa
 
   return (
     <section className="documents-panel" aria-labelledby={titleId}>
-      <h2 id={titleId}>Documents</h2>
-      <p className="muted documents-note">
-        Your uploads are private to your account and can be used in Telegram when RAG mode is active. Web chat is
-        text-only and does not use these documents.
-      </p>
+      <h2 id={titleId}>{t("documents.title")}</h2>
+      <p className="muted documents-note">{t("documents.note")}</p>
       {!telegramLinked && (
         <p className="notice documents-warning" role="note">
-          Link Telegram before uploading if you plan to use RAG there. Documents are not moved when separate accounts are
-          merged and can prevent linking.
+          {t("documents.linkWarning")}
         </p>
       )}
 
       <form className="documents-upload" onSubmit={onSubmit} aria-busy={uploading}>
         <label className="documents-label" htmlFor={fileInputId}>
-          Choose a document file
+          {t("documents.chooseFile")}
         </label>
         <input
           id={fileInputId}
@@ -407,7 +527,7 @@ export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPa
           aria-describedby={hintId}
         />
         <p className="muted documents-hint" id={hintId}>
-          PDF, TXT, MD or DOCX, up to {MAX_UPLOAD_BYTES / MIB} MiB.
+          {t("documents.hint", { max: MAX_UPLOAD_MIB })}
         </p>
         {file !== null && (
           <p className="documents-selected">
@@ -416,54 +536,56 @@ export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPa
         )}
         {problem !== null && (
           <p className="documents-problem" role="alert">
-            {FILE_PROBLEM_TEXT[problem]}
+            {fileProblemText(problem, t)}
           </p>
         )}
         <div className="documents-actions">
           <button type="submit" className="button" disabled={busy || file === null || problem !== null}>
-            {uploading ? "Uploading…" : "Upload"}
+            {uploading ? t("documents.uploading") : t("documents.upload")}
           </button>
         </div>
       </form>
 
       {uploading && (
         <p className="muted documents-status" role="status">
-          Uploading… the server processes and indexes the file, so this can take a while.
+          {t("documents.uploadingStatus")}
         </p>
       )}
       {notice !== null && (
         <div
-          className={notice.kind === "error" ? "notice notice-error" : "notice"}
-          role={notice.kind === "error" ? "alert" : "status"}
+          className={noticeIsError(notice) ? "notice notice-error" : "notice"}
+          role={noticeIsError(notice) ? "alert" : "status"}
         >
-          {notice.text}
+          {noticeMessage(notice, t)}
         </div>
       )}
 
       <div className="documents-toolbar">
-        <h3>Your documents</h3>
+        <h3>{t("documents.yourDocuments")}</h3>
         <button type="button" className="button button-secondary" onClick={() => reload(null)} disabled={busy}>
-          Refresh
+          {t("documents.refresh")}
         </button>
       </div>
 
       {loading && (
         <p className="muted documents-status" role="status">
-          Loading documents…
+          {t("documents.loading")}
         </p>
       )}
       {view.status === "failed" && (
         <div className="notice notice-error" role="alert">
-          <p>Couldn’t load your documents. {view.error}</p>
+          <p>{t("documents.loadFailed", { detail: view.error === null ? "" : apiErrorMessage(view.error, t) })}</p>
           <button type="button" className="button button-secondary" onClick={() => reload(null)} disabled={busy}>
-            Retry
+            {t("documents.retry")}
           </button>
         </div>
       )}
-      {view.status === "ready" && view.items.length === 0 && <p className="muted documents-empty">No documents yet.</p>}
+      {view.status === "ready" && view.items.length === 0 && (
+        <p className="muted documents-empty">{t("documents.empty")}</p>
+      )}
 
       {view.items.length > 0 && (
-        <ul className="documents-list" aria-label="Your documents" aria-busy={loading}>
+        <ul className="documents-list" aria-label={t("documents.yourDocuments")} aria-busy={loading}>
           {view.items.map((item, index) => {
             const nameId = `${titleId}-name-${index}`;
             const deleting = mutation?.kind === "delete" && mutation.id === item.id;
@@ -476,7 +598,8 @@ export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPa
                     {item.display_name}
                   </span>
                   <span className="muted documents-time">
-                    Uploaded <time dateTime={normalized}>{formatDocumentCreatedAt(item.created_at)}</time>
+                    {t("documents.uploadedPrefix")}{" "}
+                    <time dateTime={normalized}>{formatDocumentCreatedAt(item.created_at, locale)}</time>
                   </span>
                 </div>
                 <button
@@ -497,11 +620,11 @@ export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPa
                     }
                   }}
                 >
-                  Delete
+                  {t("documents.delete")}
                 </button>
                 {confirming && (
-                  <div className="documents-confirmation" role="group" aria-label="Confirm deletion">
-                    <p>Delete this document? This can’t be undone.</p>
+                  <div className="documents-confirmation" role="group" aria-label={t("documents.confirmDeletionLabel")}>
+                    <p>{t("documents.confirmDeleteQuestion")}</p>
                     <div className="documents-actions">
                       <button
                         type="button"
@@ -509,7 +632,7 @@ export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPa
                         onClick={() => cancelDelete(item.id)}
                         disabled={busy}
                       >
-                        Cancel
+                        {t("documents.cancel")}
                       </button>
                       <button
                         type="button"
@@ -518,17 +641,17 @@ export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPa
                         disabled={busy}
                         aria-describedby={nameId}
                       >
-                        {deleting ? "Deleting…" : "Confirm Delete"}
+                        {deleting ? t("documents.deleting") : t("documents.confirmDelete")}
                       </button>
                     </div>
                     {deleting && (
                       <p className="muted documents-status" role="status">
-                        Deleting this document…
+                        {t("documents.deletingStatus")}
                       </p>
                     )}
                     {rowError?.id === item.id && (
                       <p className="documents-problem" role="alert">
-                        {rowError.text}
+                        {deleteFailureMessage(rowError.reason, t)}
                       </p>
                     )}
                   </div>
@@ -539,23 +662,23 @@ export function DocumentsPanel({ telegramLinked, disabled = false }: DocumentsPa
         </ul>
       )}
 
-      <nav className="documents-pager" aria-label="Documents pages">
+      <nav className="documents-pager" aria-label={t("documents.pagerLabel")}>
         <button
           type="button"
           className="button button-secondary"
           onClick={() => reload(view.page - 1)}
           disabled={busy || loading || view.page === 0}
         >
-          Previous
+          {t("documents.previous")}
         </button>
-        <span className="muted">Page {view.page + 1}</span>
+        <span className="muted">{t("documents.page", { n: view.page + 1 })}</span>
         <button
           type="button"
           className="button button-secondary"
           onClick={() => reload(view.page + 1)}
           disabled={busy || loading || !view.hasNext}
         >
-          Next
+          {t("documents.next")}
         </button>
       </nav>
     </section>

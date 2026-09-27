@@ -146,15 +146,23 @@ _ALLOWED_HISTORY_ROLES = frozenset({"user", "assistant"})
 _ALLOWED_HISTORY_KEYS = frozenset({"role", "content"})
 _CANONICAL_MODES = frozenset(BotMode.ALL)
 
-# The SAME trusted tutor persona previously inlined in app/tutor.py's plain-
-# chat branch (Stage 7A-1: moved here, unchanged, so Telegram's delegated
-# call produces byte-identical output to before this refactor). Never
-# client-suppliable — this is the only system prompt the plain-chat path
-# ever sends.
+# The SAME trusted assistant persona previously inlined in app/tutor.py's
+# plain-chat branch (Stage 7A-1: moved here). Never client-suppliable — this
+# is the only system prompt the plain-chat path ever sends.
+#
+# Post-Stage-7 Batch 2: generalized from a Python-specific "тьютор по
+# Python" persona to a domain-neutral learning assistant, and the language
+# instruction changed from an unconditional "answer in Russian" to
+# following the user's own language — see this module's docstring's
+# neighboring note and BATCH 2's product-direction memory. Python-specific
+# content is not part of this persona description; it may still come up
+# through the user's own questions or (in RAG mode) the knowledge base.
 TUTOR_SYSTEM_PROMPT = (
-    "Ты — персональный тьютор по Python. Отвечай на русском, кратко и по делу. "
-    "Не используй разметку markdown — только обычный текст. Примеры кода пиши с отступом, "
-    "без ** и без обратных кавычек. Объясняй концепции и лучшие практики."
+    "You are a knowledgeable, patient learning assistant. Answer clearly and concisely. "
+    "Reply in the language the user is writing in; if their language is unclear, match the "
+    "language of the current conversation. Do not use markdown formatting — plain text only. "
+    "Write code examples with indentation, never with ** or backticks. Explain concepts and "
+    "best practices."
 )
 
 

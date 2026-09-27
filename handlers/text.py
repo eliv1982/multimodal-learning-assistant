@@ -40,7 +40,7 @@ async def callback_mode(callback: types.CallbackQuery):
     await user_sessions.set_mode(user_uuid, mode)
     logger.info("Mode switched (button) | telegram_user_id=%s, new_mode=%s", telegram_user_id, mode)
     descriptions = {
-        BotMode.TEXT: "📝 Текстовый режим — диалог по Python",
+        BotMode.TEXT: "📝 Текстовый режим — диалог на учебные темы (например, Python)",
         BotMode.VOICE: "🎤 Голосовой режим — ответы голосом и текстом",
         BotMode.VISION: "📸 Режим Vision — анализ изображений (код, ошибки)",
         BotMode.RAG: "📚 Режим RAG — ответы по базе знаний (документы)",
@@ -72,7 +72,7 @@ async def cmd_mode(message: types.Message):
         await user_sessions.set_mode(user_uuid, new_mode)
         logger.info("Mode switched (command) | telegram_user_id=%s, new_mode=%s", telegram_user_id, new_mode)
         mode_descriptions = {
-            BotMode.TEXT: "📝 Текстовый режим — диалог по Python",
+            BotMode.TEXT: "📝 Текстовый режим — диалог на учебные темы (например, Python)",
             BotMode.VOICE: "🎤 Голосовой режим — ответы голосом и текстом",
             BotMode.VISION: "📸 Режим Vision — анализ изображений (код, ошибки)",
             BotMode.RAG: "📚 Режим RAG — ответы по базе знаний (документы)",

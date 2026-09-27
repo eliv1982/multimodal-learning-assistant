@@ -48,7 +48,26 @@ describe("placeholder parity", () => {
 
   it("has placeholders where the interface interpolates, and only there", () => {
     const withPlaceholders = KEYS.filter((key) => placeholders(en[key]).length > 0);
-    expect(withPlaceholders.sort()).toEqual(["chat.hint", "chat.tooLong", "title.signIn", "title.verificationError"]);
+    expect(withPlaceholders.sort()).toEqual(
+      [
+        "chat.hint",
+        "chat.tooLong",
+        "title.signIn",
+        "title.verificationError",
+        "documents.hint",
+        "documents.problemTooLarge",
+        "documents.problemNameTooLong",
+        "documents.tooLargeForServer",
+        "documents.uploadGeneric",
+        "documents.deleteGeneric",
+        "documents.uploaded",
+        "documents.deleted",
+        "documents.loadFailed",
+        "documents.page",
+        "settings.loadFailed",
+        "settings.saveFailed",
+      ].sort(),
+    );
     expect(placeholders(en["chat.hint"])).toEqual(["length", "max"]);
     expect(placeholders(en["title.signIn"])).toEqual(["product"]);
   });

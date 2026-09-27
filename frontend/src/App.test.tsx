@@ -1875,10 +1875,11 @@ describe("interface language", () => {
 
       await user.click(screen.getByRole("button", { name: "Русский" }));
 
-      // Nothing was remounted: not the composer (and its draft), not the issued link, not the panel.
+      // Nothing was remounted: not the composer (and its draft), not the issued link, not the
+      // panel — only their accessible names retranslate.
       expect(screen.getByRole("textbox", { name: "Ваше сообщение" })).toBe(composer);
       expect(composer.value).toBe("half-written thought");
-      expect(screen.getByRole("link", { name: "Open Telegram" })).toBe(link);
+      expect(screen.getByRole("link", { name: "Открыть Telegram" })).toBe(link);
       expect(screen.getByRole("button", { name: "Настройки" }).getAttribute("aria-expanded")).toBe("true");
       expect(calls).toHaveLength(requestsBefore);
     });

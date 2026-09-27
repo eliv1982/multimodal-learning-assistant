@@ -7,6 +7,8 @@ import { NETWORK_ERROR_DETAIL, SERVER_ERROR_DETAIL, UNEXPECTED_RESPONSE_DETAIL }
 import type { CurrentUser } from "../api/types";
 import { AuthProvider } from "../auth/AuthContext";
 import { useAuth } from "../auth/useAuth";
+import { I18nProvider } from "../i18n/I18nProvider";
+import { LOCALE_STORAGE_KEY } from "../i18n/storage";
 import {
   SAMPLE_USER,
   SENSITIVE_DETAILS,
@@ -16,6 +18,7 @@ import {
   type FetchHandler,
 } from "../test/http";
 import { AccountLinkingPanel } from "./AccountLinkingPanel";
+import { LanguageSwitcher } from "./LanguageSwitcher";
 
 const BOT_PATH = "/my_tutor_bot";
 const FIRST_SECRET = "A".repeat(43);
@@ -330,5 +333,147 @@ describe("operation lifecycle", () => {
     const start = view.calls.find((call) => call.url === "/api/link/telegram/start");
     view.unmount();
     expect(start?.init.signal?.aborted).toBe(true);
+  });
+});
+
+describe("in Russian", () => {
+  function renderRussian(other: FetchHandler, options: { user?: CurrentUser } = {}) {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    const initialUser = options.user ?? SAMPLE_USER;
+    const harness = mockFetch((call) => (call.url === "/api/me" ? jsonResponse(200, initialUser) : other(call)));
+    const view = render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <AuthProvider>
+          <Harness />
+        </AuthProvider>
+      </I18nProvider>,
+    );
+    return { ...harness, ...view };
+  }
+
+  it("renders the unlinked state, the link flow, and disconnection copy in Russian", async () => {
+    const user = userEvent.setup();
+    const response = linkResponse();
+    renderRussian(() => jsonResponse(200, response));
+    await screen.findByRole("heading", { name: "Подключения аккаунта" });
+
+    expect(screen.getByText("Не связан")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Связать Telegram" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Связать Telegram" }));
+
+    const open = await screen.findByRole("link", { name: "Открыть Telegram" });
+    expect(open.getAttribute("href")).toBe(response.deep_link);
+    expect(screen.getByText(/Истекает/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Проверить статус связи" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Создать новую ссылку" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Отключить веб-доступ через GitHub" }));
+
+    expect(screen.getByRole("group", { name: "Подтверждение отключения GitHub" })).toBeTruthy();
+    // SAMPLE_USER is unlinked from Telegram, so this is the "may be removed" branch.
+    expect(screen.getByText(/Пустой веб-аккаунт может быть удалён/)).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/Link Telegram|Account connections|Not linked/);
+  });
+
+  it("shows the fixed client-owned error copy in Russian for a 503 start failure", async () => {
+    const user = userEvent.setup();
+    renderRussian(() => jsonResponse(503, { detail: "boom" }));
+    await screen.findByRole("heading", { name: "Подключения аккаунта" });
+
+    await user.click(screen.getByRole("button", { name: "Связать Telegram" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Связывание с Telegram сейчас недоступно");
+    expect(alert.textContent).not.toContain("boom");
+  });
+
+  it("switches the already-visible panel's language without any new request", async () => {
+    const user = userEvent.setup();
+    const harness = mockFetch((call) => (call.url === "/api/me" ? jsonResponse(200, SAMPLE_USER) : jsonResponse(599, {})));
+    render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <AuthProvider>
+          <Harness />
+        </AuthProvider>
+      </I18nProvider>,
+    );
+    await screen.findByRole("heading", { name: "Account connections" });
+    const before = harness.calls.length;
+
+    await user.click(screen.getByRole("button", { name: "Русский" }));
+
+    expect(screen.getByRole("heading", { name: "Подключения аккаунта" })).toBeTruthy();
+    expect(screen.getByText("Не связан")).toBeTruthy();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(harness.calls).toHaveLength(before);
+  });
+
+  it("shows the generic ApiError mapping in Russian for a 500 start failure, leaking no fixed English detail", async () => {
+    const user = userEvent.setup();
+    renderRussian(() => jsonResponse(500, { detail: SENSITIVE_DETAILS[0] }));
+    await screen.findByRole("heading", { name: "Подключения аккаунта" });
+
+    await user.click(screen.getByRole("button", { name: "Связать Telegram" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("На сервере возникла проблема");
+    expect(alert.textContent).not.toContain(SERVER_ERROR_DETAIL);
+    expect(alert.textContent).not.toContain(SENSITIVE_DETAILS[0]);
+  });
+
+  it("retranslates a visible link-ready notice after switching locale, with no new request", async () => {
+    const user = userEvent.setup();
+    const response = linkResponse();
+    const harness = mockFetch((call) => (call.url === "/api/me" ? jsonResponse(200, SAMPLE_USER) : jsonResponse(200, response)));
+    render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <AuthProvider>
+          <Harness />
+        </AuthProvider>
+      </I18nProvider>,
+    );
+    await screen.findByRole("heading", { name: "Account connections" });
+    await user.click(screen.getByRole("button", { name: "Link Telegram" }));
+    await screen.findByText("Telegram link ready. Open it, then check the link status here.");
+    const before = harness.calls.length;
+
+    await user.click(screen.getByRole("button", { name: "Русский" }));
+
+    expect(screen.getByText("Ссылка для Telegram готова. Откройте её, затем проверьте статус связи здесь.")).toBeTruthy();
+    expect(screen.queryByText("Telegram link ready. Open it, then check the link status here.")).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(harness.calls).toHaveLength(before);
+  });
+
+  it("shows a Russian result notice for a Telegram link started in English and resolved after the locale switch", async () => {
+    const user = userEvent.setup();
+    const gate = deferred<Response>();
+    mockFetch((call) => (call.url === "/api/me" ? jsonResponse(200, SAMPLE_USER) : gate.promise));
+    render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <AuthProvider>
+          <Harness />
+        </AuthProvider>
+      </I18nProvider>,
+    );
+    await screen.findByRole("heading", { name: "Account connections" });
+
+    await user.click(screen.getByRole("button", { name: "Link Telegram" }));
+    expect(screen.getByRole("button", { name: "Creating link…" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Русский" }));
+    expect(screen.getByRole("button", { name: "Создаём ссылку…" })).toBeTruthy();
+
+    await act(async () => {
+      gate.resolve(jsonResponse(200, linkResponse()));
+      await gate.promise;
+    });
+
+    expect(await screen.findByText("Ссылка для Telegram готова. Откройте её, затем проверьте статус связи здесь.")).toBeTruthy();
   });
 });

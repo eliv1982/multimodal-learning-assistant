@@ -12,6 +12,8 @@ import {
 import { MAX_UPLOAD_BYTES, UPLOAD_TIMEOUT_MS } from "../api/documents";
 import { AuthProvider } from "../auth/AuthContext";
 import { useAuth } from "../auth/useAuth";
+import { I18nProvider } from "../i18n/I18nProvider";
+import { LOCALE_STORAGE_KEY } from "../i18n/storage";
 import appCss from "../styles/app.css?raw";
 import {
   SAMPLE_USER,
@@ -23,6 +25,7 @@ import {
   type RecordedCall,
 } from "../test/http";
 import { DocumentsPanel, formatDocumentCreatedAt } from "./DocumentsPanel";
+import { LanguageSwitcher } from "./LanguageSwitcher";
 
 type Handler = (call: RecordedCall) => Response | Promise<Response>;
 
@@ -197,58 +200,88 @@ function renderInAuth(telegramLinked = true) {
   );
 }
 
+/**
+ * The same UTC-anchored construction `formatDocumentCreatedAt` uses for an
+ * offset-less reading: the wall-clock digits, read as UTC calendar fields (UTC
+ * has no DST, so no reading is ever skipped or repeated) and formatted with
+ * the formatter itself pinned to `timeZone: "UTC"`, so the browser's real zone
+ * cannot affect the result either way.
+ */
+function wallClock(value: string, locale: string): string {
+  const [, y, mo, d, h, mi] = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(value) ?? [];
+  return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }).format(
+    Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi)),
+  );
+}
+
 describe("formatDocumentCreatedAt", () => {
   it.each([
     // The DST gap of America/New_York: 02:30 does not exist there on this date.
-    ["2026-03-08T02:30:00", "2026-03-08 02:30"],
-    ["2026-03-08T02:30:00.123456", "2026-03-08 02:30"],
+    "2026-03-08T02:30:00",
+    "2026-03-08T02:30:00.123456",
     // The repeated hour of the DST overlap, in the same zone.
-    ["2026-11-01T01:30:00", "2026-11-01 01:30"],
-    ["2026-01-15T12:00:00.123456", "2026-01-15 12:00"],
+    "2026-11-01T01:30:00",
+    "2026-01-15T12:00:00.123456",
     // A fraction is cut, never rounded up into the next minute or day.
-    ["2026-12-31T23:59:59.999999", "2026-12-31 23:59"],
-    ["2026-01-01T00:00:00", "2026-01-01 00:00"],
-  ])("keeps the wall-clock digits of the offset-less %s", (input, expected) => {
-    expect(formatDocumentCreatedAt(input)).toBe(expected);
+    "2026-12-31T23:59:59.999999",
+    "2026-01-01T00:00:00",
+  ])("keeps the wall-clock digits of the offset-less %s, formatted for the locale", (input) => {
+    expect(formatDocumentCreatedAt(input, "en")).toBe(wallClock(input, "en"));
+    expect(formatDocumentCreatedAt(input, "ru")).toBe(wallClock(input, "ru"));
   });
 
-  it("never gives an offset-less value a time zone: no Date is built for it", () => {
-    // Any Date built from this string would carry the browser's zone. Failing
-    // on every construction proves the result comes from the digits alone, in
-    // whichever zone the tests happen to run. The stub is lifted before the
-    // test ends: the shared cleanup hooks need the real Date.
-    let shown: string[];
-    vi.stubGlobal(
-      "Date",
-      class {
-        constructor() {
-          throw new Error("an offset-less timestamp must not be turned into a Date");
-        }
-      },
-    );
+  it("shows an offset-less reading differently per locale, from the same untouched digits", () => {
+    const value = "2026-03-08T02:30:00";
+    expect(formatDocumentCreatedAt(value, "en")).toBe(wallClock(value, "en"));
+    expect(formatDocumentCreatedAt(value, "ru")).toBe(wallClock(value, "ru"));
+    expect(formatDocumentCreatedAt(value, "en")).not.toBe(formatDocumentCreatedAt(value, "ru"));
+  });
+
+  it("pins an offset-less reading's formatter to UTC, so the machine's real zone can never shift it", () => {
+    // Spying on the constructor (rather than trusting the output alone) proves
+    // the formatter itself is told "UTC", and that the instant it is given is
+    // the digits read as UTC fields with no zone applied — not merely that the
+    // two happen to agree on this machine's own zone.
+    const format = vi.fn(() => "stub");
+    const ctor = vi.spyOn(Intl, "DateTimeFormat").mockImplementation(function (this: unknown) {
+      return { format } as unknown as Intl.DateTimeFormat;
+    });
     try {
-      shown = ["2026-03-08T02:30:00", "2026-03-08T02:30:00.123456"].map(formatDocumentCreatedAt);
+      formatDocumentCreatedAt("2026-03-08T02:30:00.123456", "en");
+      expect(ctor).toHaveBeenCalledWith("en", expect.objectContaining({ timeZone: "UTC" }));
+      expect(format).toHaveBeenCalledWith(Date.UTC(2026, 2, 8, 2, 30));
     } finally {
-      vi.unstubAllGlobals();
+      ctor.mockRestore();
     }
-
-    expect(shown).toEqual(["2026-03-08 02:30", "2026-03-08 02:30"]);
   });
 
-  it("formats a value with Z or a numeric offset as an instant, with the locale formatter", () => {
-    const instant = (value: string) =>
-      new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  it("formats a value with Z or a numeric offset as an instant, with the given locale's formatter", () => {
+    const instant = (value: string, locale: string) =>
+      new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 
-    expect(formatDocumentCreatedAt("2026-03-08T07:30:00Z")).toBe(instant("2026-03-08T07:30:00Z"));
-    expect(formatDocumentCreatedAt("2026-03-08T02:30:00-05:00")).toBe(instant("2026-03-08T07:30:00Z"));
-    expect(formatDocumentCreatedAt("2026-03-08T07:30:00+05:00")).toBe(instant("2026-03-08T02:30:00Z"));
+    expect(formatDocumentCreatedAt("2026-03-08T07:30:00Z", "en")).toBe(instant("2026-03-08T07:30:00Z", "en"));
+    expect(formatDocumentCreatedAt("2026-03-08T02:30:00-05:00", "en")).toBe(instant("2026-03-08T07:30:00Z", "en"));
+    expect(formatDocumentCreatedAt("2026-03-08T07:30:00+05:00", "en")).toBe(instant("2026-03-08T02:30:00Z", "en"));
     // A microsecond fraction is cut to milliseconds before parsing.
-    expect(formatDocumentCreatedAt("2026-01-15T12:00:00.123456Z")).toBe(instant("2026-01-15T12:00:00.123Z"));
+    expect(formatDocumentCreatedAt("2026-01-15T12:00:00.123456Z", "en")).toBe(instant("2026-01-15T12:00:00.123Z", "en"));
+    // The Russian interface locale formats the same instant differently.
+    expect(formatDocumentCreatedAt("2026-03-08T07:30:00Z", "ru")).toBe(instant("2026-03-08T07:30:00Z", "ru"));
+    expect(formatDocumentCreatedAt("2026-03-08T07:30:00Z", "ru")).not.toBe(instant("2026-03-08T07:30:00Z", "en"));
   });
 
-  it("keeps an offset-less and an offset-aware reading of the same digits apart", () => {
-    expect(formatDocumentCreatedAt("2026-03-08T02:30:00")).toBe("2026-03-08 02:30");
-    expect(formatDocumentCreatedAt("2026-03-08T02:30:00Z")).not.toBe("2026-03-08 02:30");
+  it("keeps an offset-less wall-clock reading and an offset-aware instant reading on separate paths", () => {
+    // The offset-less path is pinned to UTC and so is fixed regardless of the
+    // machine's zone; the "Z" instant path is not pinned and follows it
+    // (proved above and in "formats a value with Z ..."). Only on a machine
+    // whose real zone is UTC would the two ever coincide for the same digits,
+    // so this compares each path against its own kind of reading instead of
+    // asserting a cross-path (in)equality that would depend on the machine's
+    // zone.
+    const instant = (value: string) =>
+      new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+    expect(formatDocumentCreatedAt("2026-03-08T02:30:00", "en")).toBe(wallClock("2026-03-08T02:30:00", "en"));
+    expect(formatDocumentCreatedAt("2026-03-08T02:30:00Z", "en")).toBe(instant("2026-03-08T02:30:00Z"));
+    expect(formatDocumentCreatedAt("2026-03-08T02:30:00-05:00", "en")).toBe(instant("2026-03-08T02:30:00-05:00"));
   });
 });
 
@@ -303,7 +336,7 @@ describe("initial load", () => {
     const times = rows().map((row) => row.querySelector("time")?.getAttribute("datetime"));
     // Fractions are cut to milliseconds, the longest a <time> value may carry.
     expect(times).toEqual(["2026-01-15T12:00:00.123", "2026-02-01T08:30:00Z", "2026-02-02T09:00:00+02:00"]);
-    expect(rows()[0]?.querySelector("time")?.textContent).toBe("2026-01-15 12:00");
+    expect(rows()[0]?.querySelector("time")?.textContent).toBe(wallClock("2026-01-15T12:00:00.123456", "en"));
     expect(rows()[0]?.textContent).toContain("Uploaded");
     expect(screen.queryByText("No documents yet.")).toBeNull();
   });
@@ -318,14 +351,14 @@ describe("initial load", () => {
     ]);
 
     const [gap, fractional] = rows().map((row) => row.querySelector("time"));
-    expect(gap?.textContent).toBe("2026-03-08 02:30");
-    expect(gap?.textContent).not.toContain("03:30");
+    expect(gap?.textContent).toBe(wallClock("2026-03-08T02:30:00", "en"));
+    expect(gap?.textContent).not.toContain("3:30"); // never rolled forward into the next hour
     expect(gap?.getAttribute("datetime")).toBe("2026-03-08T02:30:00");
-    expect(fractional?.textContent).toBe("2026-01-15 12:00");
+    expect(fractional?.textContent).toBe(wallClock("2026-01-15T12:00:00.123456", "en"));
     expect(fractional?.getAttribute("datetime")).toBe("2026-01-15T12:00:00.123");
   });
 
-  it("shows a created_at with Z or a numeric offset as the instant it names, in the browser's locale", async () => {
+  it("shows a created_at with Z or a numeric offset as the instant it names, in the interface locale (English by default)", async () => {
     await renderLoaded([
       doc(1, { created_at: "2026-03-08T07:30:00Z" }),
       doc(2, { created_at: "2026-03-08T02:30:00-05:00" }),
@@ -334,7 +367,7 @@ describe("initial load", () => {
 
     const [zulu, offset, other] = rows().map((row) => row.querySelector("time"));
     const instant = (value: string) =>
-      new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+      new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
     expect(zulu?.textContent).toBe(instant("2026-03-08T07:30:00Z"));
     // The same instant as the first row, written with an offset.
     expect(offset?.textContent).toBe(zulu?.textContent);
@@ -2035,5 +2068,228 @@ describe("browser persistence and logging", () => {
     for (const spy of consoleSpies) {
       expect(spy).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe("in Russian", () => {
+  // "Loading documents…" never appears in Russian, so the shared `loaded()`
+  // above (which waits for exactly that English text to disappear) is a
+  // silent no-op here: it resolves immediately, before the real load
+  // finishes, rather than genuinely waiting for it.
+  async function loadedRu() {
+    await waitFor(() => expect(screen.queryByText(/Загружаем документы…|Loading documents…/)).toBeNull());
+  }
+
+  // `fileInput()`/`pick()`/`rows()`/`rowFor()` above all look elements up by
+  // their English accessible name; none of them match once the panel is
+  // showing Russian.
+  const fileInputRu = () => screen.getByLabelText<HTMLInputElement>("Выберите файл документа");
+  const pickRu = (user: User, file: File) => user.upload(fileInputRu(), file);
+  const rowsRu = () => {
+    const list = screen.queryByRole("list", { name: "Ваши документы" });
+    return list === null ? [] : within(list).getAllByRole("listitem");
+  };
+  const rowForRu = (name: string) => {
+    const found = rowsRu().find((row) => row.querySelector(".documents-name")?.textContent === name);
+    if (found === undefined) throw new Error(`no row named ${name}`);
+    return found;
+  };
+
+  function renderRussian(items: unknown[], other: Parameters<typeof documentsBackend>[0] = {}, telegramLinked = true) {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    const harness = documentsBackend({ list: () => page(items), ...other });
+    const view = render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <DocumentsPanel telegramLinked={telegramLinked} />
+      </I18nProvider>,
+    );
+    return { ...harness, ...view };
+  }
+
+  it("shows the panel's static text, empty state, and pager in Russian", async () => {
+    renderRussian([]);
+    await loadedRu();
+
+    expect(screen.getByRole("heading", { level: 2, name: "Документы" })).toBeTruthy();
+    expect(screen.getByText(/Ваши загруженные файлы доступны только вам/)).toBeTruthy();
+    expect(fileInputRu()).toBeTruthy();
+    expect(screen.getByText("PDF, TXT, MD или DOCX, до 10 МиБ.")).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 3, name: "Ваши документы" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Обновить" })).toBeTruthy();
+    expect(screen.getByText("Пока нет документов.")).toBeTruthy();
+    expect(screen.getByText("Страница 1")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Назад" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Далее" })).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/Documents|No documents yet|Refresh|Previous|Next/);
+  });
+
+  it("shows the Telegram-link warning and an upload problem in Russian", async () => {
+    const user = setup();
+    renderRussian([], {}, false);
+    await loadedRu();
+
+    expect(screen.getByText(/Свяжите Telegram перед загрузкой/)).toBeTruthy();
+
+    await pickRu(user, textFile("notes.exe"));
+
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Загружать можно только файлы PDF, TXT, MD и DOCX.",
+    );
+  });
+
+  it("shows a populated row and its Delete confirmation in Russian", async () => {
+    const user = setup();
+    renderRussian([doc(1, { display_name: "заметки.pdf", created_at: "2026-02-01T08:30:00Z" })]);
+    await loadedRu();
+
+    const row = await waitFor(() => rowForRu("заметки.pdf"));
+    expect(row.textContent).toContain("Загружено");
+
+    await user.click(within(row).getByRole("button", { name: "Удалить" }));
+
+    expect(within(row).getByRole("group", { name: "Подтверждение удаления" })).toBeTruthy();
+    expect(within(row).getByText("Удалить этот документ? Это действие нельзя отменить.")).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Отмена" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Подтвердить удаление" })).toBeTruthy();
+  });
+
+  it("uploads and reports success in Russian, without changing the request sent", async () => {
+    const user = setup();
+    const { uploads } = renderRussian([], { upload: () => jsonResponse(201, doc(1, { display_name: "notes.txt" })) });
+    await loadedRu();
+
+    await pickRu(user, textFile("notes.txt"));
+    await user.click(screen.getByRole("button", { name: "Загрузить" }));
+
+    await screen.findByText("Загружено «notes.txt».");
+    expect(uploads()).toHaveLength(1);
+    expect((uploads()[0]?.init.body as FormData).get("file")).toBeInstanceOf(File);
+  });
+
+  it("renders a Russian-formatted date that differs from the English formatting of the same instant", async () => {
+    renderRussian([doc(1, { created_at: "2026-03-08T07:30:00Z" })]);
+    await loadedRu();
+
+    const shown = await waitFor(() => {
+      const text = rowsRu()[0]?.querySelector("time")?.textContent;
+      expect(text).toBeTruthy();
+      return text;
+    });
+    expect(shown).toBe(formatDocumentCreatedAt("2026-03-08T07:30:00Z", "ru"));
+    expect(shown).not.toBe(formatDocumentCreatedAt("2026-03-08T07:30:00Z", "en"));
+  });
+
+  it("renders an offset-less wall-clock date in Russian locale conventions, with the same wall-clock digits as English", async () => {
+    renderRussian([doc(1, { created_at: "2026-03-08T02:30:00" })]);
+    await loadedRu();
+
+    const shown = await waitFor(() => {
+      const text = rowsRu()[0]?.querySelector("time")?.textContent;
+      expect(text).toBeTruthy();
+      return text;
+    });
+    expect(shown).toBe(wallClock("2026-03-08T02:30:00", "ru"));
+    expect(shown).not.toBe(wallClock("2026-03-08T02:30:00", "en"));
+    // Same wall-clock reading in both locales: only the formatting differs.
+    expect(shown).toContain("2:30");
+  });
+
+  it("switches the already-visible panel's language without any new request", async () => {
+    const user = setup();
+    const { lists } = documentsBackend({ list: () => page([doc(1, { display_name: "a.pdf" })]) });
+    render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <DocumentsPanel telegramLinked />
+      </I18nProvider>,
+    );
+    await loaded();
+    expect(screen.getByRole("heading", { level: 2, name: "Documents" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Русский" }));
+
+    expect(screen.getByRole("heading", { level: 2, name: "Документы" })).toBeTruthy();
+    expect(screen.getByText("a.pdf")).toBeTruthy();
+    await sleep(30);
+    expect(lists()).toHaveLength(1);
+  });
+
+  it("retranslates a visible upload-success notice after switching locale, with no new request", async () => {
+    const user = setup();
+    const { uploads } = documentsBackend({
+      list: () => page([]),
+      upload: () => jsonResponse(201, doc(1, { display_name: "notes.txt" })),
+    });
+    render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <DocumentsPanel telegramLinked />
+      </I18nProvider>,
+    );
+    await loaded();
+    await pick(user, textFile("notes.txt"));
+    await user.click(screen.getByRole("button", { name: "Upload" }));
+    await screen.findByText("Uploaded “notes.txt”.");
+
+    await user.click(screen.getByRole("button", { name: "Русский" }));
+
+    expect(screen.getByText("Загружено «notes.txt».")).toBeTruthy();
+    expect(screen.queryByText("Uploaded “notes.txt”.")).toBeNull();
+    await sleep(30);
+    expect(uploads()).toHaveLength(1);
+  });
+
+  it("retranslates a visible upload-failure notice built from a generic ApiError, leaking no fixed English detail into Russian", async () => {
+    const user = setup();
+    const { uploads } = documentsBackend({
+      list: () => page([]),
+      upload: () => jsonResponse(403, { detail: SENSITIVE_DETAILS[0] }),
+    });
+    render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <DocumentsPanel telegramLinked />
+      </I18nProvider>,
+    );
+    await loaded();
+    await pick(user, textFile("bad.txt"));
+    await user.click(screen.getByRole("button", { name: "Upload" }));
+    const alertEn = await screen.findByRole("alert");
+    expect(alertEn.textContent).toContain(FORBIDDEN_ERROR_DETAIL);
+
+    await user.click(screen.getByRole("button", { name: "Русский" }));
+
+    const alertRu = screen.getByRole("alert");
+    expect(alertRu.textContent).toContain("Не удалось загрузить этот файл.");
+    expect(alertRu.textContent).toContain("Сервер отклонил запрос");
+    expect(alertRu.textContent).not.toContain(FORBIDDEN_ERROR_DETAIL);
+    expect(alertRu.textContent).not.toContain(SENSITIVE_DETAILS[0]);
+    await sleep(30);
+    expect(uploads()).toHaveLength(1);
+  });
+
+  it("shows a Russian result notice for an upload that started in English and resolved after the locale switch", async () => {
+    const user = setup();
+    const { gate, handler } = held();
+    documentsBackend({ list: () => page([]), upload: handler });
+    render(
+      <I18nProvider>
+        <LanguageSwitcher />
+        <DocumentsPanel telegramLinked />
+      </I18nProvider>,
+    );
+    await loaded();
+    await pick(user, textFile("slow.txt"));
+    await user.click(screen.getByRole("button", { name: "Upload" }));
+    expect(screen.getByRole("button", { name: "Uploading…" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Русский" }));
+    expect(screen.getByRole("button", { name: "Загружаем…" })).toBeTruthy();
+
+    await settle(gate, jsonResponse(201, doc(1, { display_name: "slow.txt" })));
+
+    expect(await screen.findByText("Загружено «slow.txt».")).toBeTruthy();
+    expect(screen.queryByText("Uploaded “slow.txt”.")).toBeNull();
   });
 });

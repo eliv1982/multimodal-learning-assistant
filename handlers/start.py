@@ -85,9 +85,9 @@ async def cmd_start(message: types.Message):
 
     welcome_text = f"""👋 Привет, {user_name}!
 
-Я — персональный тьютор по Python с мультимодальным функционалом:
+Я — учебный ассистент с мультимодальным функционалом. Помогу с программированием (например, на Python), учёбой и разбором материалов:
 
-🔤 Текст — объяснения, примеры кода, ответы на вопросы по Python
+🔤 Текст — объяснения, примеры кода, ответы на вопросы
 🎤 Голос — отправь голосовое сообщение, получи ответ голосом и текстом
 📸 Изображения — анализ скриншотов кода, диаграмм, ошибок
 📚 База знаний (RAG) — ответы по твоим материалам (учебники, конспекты)
@@ -96,7 +96,7 @@ async def cmd_start(message: types.Message):
 
 Режимы: /mode text · /mode voice · /mode rag · /mode vision
 
-Начни с вопроса по Python или переключи режим — помогу с учёбой! 🐍"""
+Начни с любого вопроса или переключи режим — помогу с учёбой! 🎓"""
     
     await bot.send_message(message.chat.id, welcome_text)
 
@@ -108,10 +108,10 @@ async def cmd_help(message: types.Message):
     telegram_user_id = message.from_user.id
     logger.info("Command /help | telegram_user_id=%s", telegram_user_id)
     
-    help_text = """📖 Personal Python Tutor — справка
+    help_text = """📖 Учебный ассистент — справка
 
 Режимы (команда /mode):
-• /mode text — текстовый диалог по Python
+• /mode text — текстовый диалог на учебные темы (например, Python)
 • /mode voice — голосовые ответы: отправь голос → Whisper → ответ голосом и текстом
 • /mode rag — ответы по базе знаний (твои PDF/TXT/MD/DOCX)
 • /mode vision — анализ изображений (скриншоты кода, ошибки, схемы)

@@ -81,7 +81,7 @@ async def test_mode_callback_text_wording_is_provider_neutral():
 
     sent_text = shared_bot.send_message.await_args.args[1]
     assert "GPT-4o" not in sent_text
-    assert "Текстовый режим — диалог по Python" in sent_text
+    assert "Текстовый режим — диалог на учебные темы (например, Python)" in sent_text
 
 
 @pytest.mark.asyncio
@@ -92,7 +92,7 @@ async def test_mode_command_text_wording_is_provider_neutral():
 
     sent_text = shared_bot.send_message.await_args.args[1]
     assert "GPT-4o" not in sent_text
-    assert "Текстовый режим — диалог по Python" in sent_text
+    assert "Текстовый режим — диалог на учебные темы (например, Python)" in sent_text
 
 
 @pytest.mark.asyncio
@@ -102,8 +102,8 @@ async def test_help_mode_list_wording_is_provider_neutral():
     await start.cmd_help(message)
 
     sent_text = shared_bot.send_message.await_args.args[1]
-    assert "/mode text — текстовый диалог по Python" in sent_text
-    assert "/mode text — текстовый диалог по Python (GPT-4o)" not in sent_text
+    assert "/mode text — текстовый диалог на учебные темы (например, Python)" in sent_text
+    assert "/mode text — текстовый диалог на учебные темы (например, Python) (GPT-4o)" not in sent_text
 
 
 @pytest.mark.asyncio
