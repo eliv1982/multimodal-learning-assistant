@@ -1,0 +1,178 @@
+# Stage 8B: production Compose/runtime deployment contract.
+#
+# Scope: packages the ALREADY-ACCEPTED Stage 8A image (this repo's own
+# Dockerfile) for a single-host production deployment behind an existing,
+# externally managed Traefik reverse proxy. Does not change application
+# architecture: one app process (`python service_main.py`, Telegram +
+# web unified, see service_main.py's own docstring), one embedded-mode
+# Qdrant store, one PostgreSQL instance. No worker/queue infrastructure,
+# no split Telegram/web containers, no second app replica — a second
+# replica sharing the same mounted /app/data/qdrant would fail to start
+# (rag/index.py's QdrantClient(path=...) holds an exclusive on-disk lock).
+#
+# Deliberately NOT run automatically by this file: Alembic migrations
+# (see the `migrate` service below — gated behind the "tools" Compose
+# profile so `docker compose up` never runs it) and any live deployment
+# action. See docs/PRODUCTION_DEPLOYMENT.md for the full runbook.
+
+networks:
+  # Private network for app <-> PostgreSQL only. `internal: true` means
+  # containers reachable ONLY through this network get no route to the
+  # outside world — PostgreSQL never needs one. The app also joins
+  # app-public below, so the app's own required outbound egress (OpenAI,
+  # Anthropic, Telegram, GitHub OAuth) is unaffected.
+  app-internal:
+    internal: true
+  # The existing server's Traefik-facing network. MUST already exist on
+  # the target host, created by the Traefik stack itself — external: true
+  # means `docker compose up` never creates or owns it, and never removes
+  # it on `down`.
+  #
+  # NO DEFAULT — see docs/PRODUCTION_DEPLOYMENT.md, "Open issues /
+  # server-dependent values": the prompt's stated expectation
+  # (n8n_n8n_network) does not match the only Traefik-shaped network name
+  # observed on the machine this file was authored on
+  # (n8n_n8n-network, hyphen) — and that machine is a local dev box, not
+  # the production server, so neither name is trustworthy evidence either
+  # way. A silently-applied guess here could join the app to the wrong
+  # network (or fail to join Traefik at all) with no error, so this value
+  # has no fallback: `docker compose config`/`up` fails closed until the
+  # real network name is confirmed on the target server (`docker network
+  # ls` there) and set in `.env.production`.
+  app-public:
+    external: true
+    name: ${TRAEFIK_NETWORK_NAME:?set verified production Traefik network}
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  uploads_data:
+
+# Single source of truth for the app's PostgreSQL DSN: derived from the
+# same POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB values the `postgres`
+# service itself is bootstrapped with, host fixed to the Compose DNS name
+# "postgres" and port fixed to 5432 (never published elsewhere) — this is
+# what removes any risk of the app's DATABASE_URL silently drifting from
+# the actual database credentials/name. POSTGRES_PASSWORD is interpolated
+# into this URL verbatim (no automatic URL-encoding) — see
+# .env.production.example's own note: use a generated, URL-safe secret
+# (e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"`),
+# never a password containing '@', ':', '/', '#', '%', or other DSN-special
+# characters. Do not percent-encode the password as a workaround: the same
+# raw value is also passed to the `postgres` service below as the literal
+# password, so encoding it only here would create a mismatch.
+x-database-url: &database_url
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app-internal
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    # No `ports:` — PostgreSQL is reachable only from app-internal, never
+    # from the host or the public Traefik network (Stage 8B network
+    # isolation contract).
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${APP_IMAGE:-multimodal-learning-assistant:latest}
+    restart: unless-stopped
+    # .env.production, NEVER the plain .env local development already
+    # uses at this same path (Stage 8B verification incident: `env_file:`
+    # is a literal path unaffected by `docker compose --env-file`, so a
+    # generic ".env" name here would have silently loaded whatever
+    # unrelated local-dev .env already exists in the directory this file
+    # is run from). See .env.production.example's own header.
+    env_file:
+      - .env.production
+    environment:
+      <<: *database_url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app-internal
+      - app-public
+    volumes:
+      # Named volumes only — no host bind mounts. Both directories already
+      # exist, owned appuser:appgroup (10001:10001) mode 700, inside the
+      # accepted Stage 8A image; Docker seeds a fresh named volume from the
+      # image's own directory content (including ownership) on first
+      # mount, so no extra chown step is needed here. Verified in Stage 8B
+      # disposable testing — see docs/PRODUCTION_DEPLOYMENT.md.
+      - qdrant_data:/app/data/qdrant
+      - uploads_data:/app/data/documents/uploads
+      # Deliberately NOT volume-mounted (documented, not an oversight):
+      #  - /app/data/generated_images (DALL-E output): ephemeral by
+      #    design, Stage 8B does not require persisting it; the image
+      #    already creates+chowns this path (Stage 8A corrective pass —
+      #    see the Dockerfile's own comment) so it stays writable by
+      #    appuser without a volume.
+      #  - /app/bot.log: file-based logging is secondary to the
+      #    console handler, which the same configure_logging() call
+      #    installs with identical content/format — `docker compose logs
+      #    app` already captures everything bot.log would. See the
+      #    runbook's persistence section for the full rationale.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${TRAEFIK_NETWORK_NAME:?set verified production Traefik network}"
+      - "traefik.http.routers.mla.rule=Host(`learn.elivcloud.org`)"
+      # NO DEFAULTS (entrypoint name, cert resolver name) — see the
+      # app-public network comment above and
+      # docs/PRODUCTION_DEPLOYMENT.md's open-issues section. A guessed
+      # default here would silently route through the wrong entrypoint/
+      # cert resolver instead of failing loudly, so both fail closed until
+      # confirmed against the real Traefik configuration (e.g. the
+      # existing `plain-english` deployment's own labels) before Stage 8C.
+      - "traefik.http.routers.mla.entrypoints=${TRAEFIK_ENTRYPOINT:?set verified production HTTPS entrypoint}"
+      - "traefik.http.routers.mla.tls=true"
+      - "traefik.http.routers.mla.tls.certresolver=${TRAEFIK_CERT_RESOLVER:?set verified production certificate resolver}"
+      - "traefik.http.services.mla.loadbalancer.server.port=8000"
+    # No `ports:` — the application is reachable only through Traefik on
+    # app-public; container port 8000 (WEB_HOST=0.0.0.0/WEB_PORT=8000,
+    # baked into the image by the Dockerfile) is never published on the
+    # host.
+
+  # One-shot operator command, never started by `docker compose up`
+  # (gated behind the "tools" profile) — see docs/PRODUCTION_DEPLOYMENT.md
+  # for the exact migration workflow. Runs the SAME accepted production
+  # image, never a separate migration image, so the schema is always
+  # migrated with the exact code that will read it.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${APP_IMAGE:-multimodal-learning-assistant:latest}
+    profiles: ["tools"]
+    env_file:
+      - .env.production
+    environment:
+      <<: *database_url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app-internal
+    entrypoint: ["alembic"]
+    command: ["upgrade", "head"]

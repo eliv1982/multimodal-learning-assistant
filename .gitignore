@@ -1,5 +1,8 @@
 # Environment variables
 .env
+# Stage 8B production env file (docker-compose.prod.yml's env_file) — real
+# secrets, never the tracked .env.production.example template.
+.env.production
 
 # Python
 __pycache__/

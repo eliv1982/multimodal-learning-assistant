@@ -115,12 +115,22 @@ COPY --from=frontend-builder /frontend/dist ./frontend/dist
 RUN find /usr/local/lib -depth -type d -name '__pycache__' -empty -delete
 
 # Non-root runtime user (Stage 8A requirement). Ownership is granted only
-# on the three paths the application actually writes at runtime — never
+# on the four paths the application actually writes at runtime — never
 # `chown -R /app` — so application source, Alembic config/migrations, the
 # compiled frontend, and the reference corpus stay root-owned and
 # immutable to the runtime account:
 #   - data/qdrant            (rag/index.py's embedded QdrantClient storage)
 #   - data/documents/uploads (handlers/document_upload.py managed uploads)
+#   - data/generated_images  (services/image_generation.py's
+#                              GENERATED_IMAGES_DIR.mkdir(exist_ok=True)
+#                              runs unconditionally at module import time,
+#                              on the mandatory app.tutor/handlers.text
+#                              import chain every startup takes — Stage 8B
+#                              verification found this crashing the whole
+#                              unified process under the non-root runtime
+#                              user with PermissionError, since /app/data
+#                              itself stays root-owned and this path was
+#                              the only runtime-written one missing here)
 #   - bot.log                (utils/logging.py's configure_logging() opens
 #                              BASE_DIR / "bot.log", i.e. /app/bot.log, in
 #                              append mode; pre-creating it here means the
@@ -133,10 +143,10 @@ RUN find /usr/local/lib -depth -type d -name '__pycache__' -empty -delete
 RUN groupadd --gid 10001 appgroup \
     && useradd --uid 10001 --gid appgroup --home-dir /app --no-create-home \
         --shell /usr/sbin/nologin appuser \
-    && mkdir -p data/qdrant data/documents/uploads \
+    && mkdir -p data/qdrant data/documents/uploads data/generated_images \
     && touch bot.log \
-    && chown -R appuser:appgroup data/qdrant data/documents/uploads bot.log \
-    && chmod 700 data/qdrant data/documents/uploads \
+    && chown -R appuser:appgroup data/qdrant data/documents/uploads data/generated_images bot.log \
+    && chmod 700 data/qdrant data/documents/uploads data/generated_images \
     && chmod 600 bot.log
 
 USER appuser

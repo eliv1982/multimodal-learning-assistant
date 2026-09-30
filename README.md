@@ -793,3 +793,12 @@ npm run build
 ## Логирование
 
 Логи пишутся в консоль и в файл `bot.log`. Для подробного вывода в `.env` укажите `LOG_LEVEL=DEBUG`.
+
+## Production-развёртывание (Stage 8B)
+
+Compose-контракт для развёртывания за существующим Traefik: `docker-compose.prod.yml`,
+шаблон окружения `.env.production.example`, полный runbook —
+[`docs/PRODUCTION_DEPLOYMENT.md`](docs/PRODUCTION_DEPLOYMENT.md). Не меняет
+архитектуру приложения (по-прежнему единый процесс `service_main.py`,
+embedded Qdrant, PostgreSQL) — только упаковывает уже принятый Stage 8A
+`Dockerfile` для контролируемого production-запуска.
