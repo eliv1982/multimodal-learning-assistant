@@ -1,0 +1,160 @@
+# Stage 8A: strict build-context exclusions. The Dockerfile's runtime
+# stage copies application source by EXPLICIT path (never `COPY . .`), so
+# this file's main effect is (a) keeping the context small/fast to send to
+# the daemon and (b) a defense-in-depth backstop against anything an
+# explicit COPY path might otherwise pick up (nested caches, stray
+# secrets, the reference-corpus directory's non-allowlisted contents).
+#
+# IMPORTANT: every exclusion below that targets a bare filename or a
+# top-level directory is duplicated with a `**/` prefix. A bare pattern
+# like `__pycache__/` only matches at the root of the build context, NOT
+# inside nested package directories (app/, db/, handlers/, rag/,
+# scripts/, services/, utils/, web/, alembic/, ...) — omitting the `**/`
+# form is exactly what previously let nested __pycache__/*.pyc into the
+# final image. Keep both forms when adding new rules here.
+#
+# IMPORTANT: do NOT add a blanket `data/documents/*` negation change —
+# only the four exact reference-corpus filenames below may be
+# re-included; any other file dropped into data/documents/ (including
+# uploads/) must stay excluded. See rag/constants.BUILTIN_REFERENCE_FILES
+# for the source of truth these four names are copied from.
+
+# Version control
+.git
+.gitignore
+.github/
+
+# Local AI tool/runtime metadata (session state, lock files, PIDs,
+# timestamps) — never a build input, must never reach the daemon.
+.claude/
+**/.claude/
+
+# Environment / secrets — never baked into the image; real values are
+# injected at container-run time via the orchestrator's own env/secret
+# mechanism instead.
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# npm / pip publish credentials
+.npmrc
+**/.npmrc
+.pypirc
+**/.pypirc
+
+# Private keys, certificate bundles, SSH material
+*.pem
+**/*.pem
+*.key
+**/*.key
+*.crt
+**/*.crt
+*.cer
+**/*.cer
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx
+id_rsa*
+**/id_rsa*
+id_ed25519*
+**/id_ed25519*
+.ssh/
+**/.ssh/
+
+# Credential / secret files and directories
+*credentials*
+**/*credentials*
+*.secret
+**/*.secret
+secrets/
+**/secrets/
+
+# Python virtual environments
+venv/
+.venv/
+env/
+ENV/
+**/venv/
+**/.venv/
+**/env/
+**/ENV/
+
+# Python caches / test caches (recursive — see IMPORTANT note above)
+__pycache__/
+**/__pycache__/
+*.py[cod]
+**/*.py[cod]
+*$py.class
+**/*$py.class
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+.ruff_cache/
+**/.ruff_cache/
+.coverage
+**/.coverage
+.coverage.*
+**/.coverage.*
+htmlcov/
+**/htmlcov/
+
+# Test suite — dev-only, not part of the production runtime image.
+tests/
+requirements-dev.txt
+pytest.ini
+
+# Frontend: dependencies are installed fresh inside the builder stage
+# (`npm ci`), and any locally-built dist/ must never shadow a real build.
+frontend/node_modules/
+**/node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/.vite/
+frontend/*.tsbuildinfo
+npm-debug.log*
+**/npm-debug.log*
+
+# Logs / log artifacts
+*.log
+**/*.log
+bot.log
+**/bot.log
+
+# Local-only application data — never shipped inside the image.
+# data/qdrant and data/documents/uploads are recreated empty inside the
+# image and owned by the non-root runtime user instead (see Dockerfile);
+# the other two are legacy/generated local artifacts.
+data/qdrant/
+**/data/qdrant/
+data/chroma_db/
+data/generated_images/
+data/embeddings.db
+
+# Reference corpus allowlist: only the four committed Markdown files
+# rag/constants.BUILTIN_REFERENCE_FILES enumerates may enter the image.
+# This blanket-excludes everything else directly under data/documents/
+# (including uploads/, .gitkeep, and any ignored/private local file that
+# might be dropped there) and re-includes only those four by exact name.
+data/documents/*
+!data/documents/python-fundamentals.md
+!data/documents/functions-classes-errors.md
+!data/documents/testing-debugging.md
+!data/documents/async-python-and-apis.md
+
+# IDE / OS / editor cruft
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Repository docs not needed at runtime
+README.md
+docs/
