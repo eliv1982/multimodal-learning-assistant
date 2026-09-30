@@ -83,8 +83,11 @@ route:
 Callback error handling (Section 15 of the Stage 6B spec): every failure
 path — GitHub denial, missing/malformed/mismatched/invalid/expired/
 replayed state, missing code, a provider HTTP/network/JSON error, an
-invalid GitHub identity payload, a stale OAuth generation (Stage 6C
-corrective pass, independent-audit MAJOR 1 — see
+invalid GitHub identity payload, a GitHub id not on the production
+allowlist (utils/github_access_control.py — pre-deployment corrective
+pass: successful GitHub authentication is no longer sufficient BY ITSELF
+for authorization, see that module's own docstring), a stale OAuth
+generation (Stage 6C corrective pass, independent-audit MAJOR 1 — see
 app.github_identity.resolve_user_uuid_for_oauth()'s own docstring), or a
 StalePostureError from session minting — returns a generic 4xx/5xx
 response and mints no session, never leaking the client secret, the PKCE
@@ -139,6 +142,7 @@ import app.github_identity as github_identity
 import app.oauth_transaction as oauth_transaction
 import github_oauth_config
 import services.github_oauth_client as github_oauth_client
+import utils.github_access_control as github_access_control
 import web_config
 from web.cookies import set_session_cookie
 
@@ -321,6 +325,21 @@ async def github_callback(request: Request) -> Response:
         logger.warning("GitHub OAuth provider interaction failed")
         return _error_response(
             status.HTTP_502_BAD_GATEWAY, "GitHub authentication failed", clear_oauth_cookie=True
+        )
+
+    # Private/invite-only admission gate (utils/github_access_control.py) —
+    # checked on the immutable numeric GitHub id BEFORE any github_accounts/
+    # users row is created for it, so an unauthorized GitHub account (any
+    # account not on GITHUB_ALLOWED_USER_IDS) never gets a canonical user
+    # created, never gets a session, and leaves no trace in the identity
+    # tables — a successfully-completed GitHub OAuth handshake is
+    # authentication only, not by itself authorization.
+    if not github_access_control.is_github_user_authorized(github_user_id):
+        logger.warning("GitHub OAuth login rejected: GitHub id not on the production allowlist")
+        return _error_response(
+            status.HTTP_403_FORBIDDEN,
+            "This GitHub account is not authorized to use this application",
+            clear_oauth_cookie=True,
         )
 
     # Generation-aware resolution (Stage 6C corrective pass, independent-

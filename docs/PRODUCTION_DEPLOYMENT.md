@@ -54,6 +54,15 @@ Telegram + web (Stage 7A-3)"), один embedded-режим Qdrant, один Pos
   user id, не секрет доступа сам по себе), ротация не требуется. Тем не
   менее это privacy-значение: убедитесь, что список содержит только
   реально предназначенных пользователей перед production-запуском.
+- **`GITHUB_ALLOWED_USER_IDS`** (pre-deployment corrective pass) — тот же
+  статус, что и `TELEGRAM_ALLOWED_USER_IDS` выше: не credential, ротация
+  не требуется, но это ОБЯЗАТЕЛЬНОЕ privacy/access-control значение —
+  продукт private/invite-only, а не публичный. Пусто/не задано = вход
+  через GitHub запрещён всем (fail closed), НЕ "всем разрешено" — успешная
+  GitHub OAuth-аутентификация сама по себе больше не достаточна для
+  доступа к web-приложению (см. utils/github_access_control.py). Укажите
+  здесь числовые GitHub user id (never `login`/username) владельца и
+  каждого доверенного пользователя перед production-запуском.
 
 **Требования к процессу:**
 

@@ -159,6 +159,28 @@ def _default_test_access_allowed(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _default_test_github_access_allowed(monkeypatch):
+    """
+    Pre-deployment corrective pass added a fail-closed GitHub web-login
+    allowlist (utils.github_access_control) in front of
+    web/github_oauth.py's callback: with no GITHUB_ALLOWED_USER_IDS
+    configured (the default in this test environment), every GitHub id is
+    denied.
+
+    Tests written before/independent of that gate authenticate as
+    arbitrary GitHub ids and don't expect to be denied, so default every
+    test to "authorized" here — same mechanism as
+    _default_test_access_allowed above for the Telegram gate. A dedicated
+    test module for utils.github_access_control itself defines a
+    same-named fixture that shadows this one, leaving the real
+    is_github_user_authorized() in place so it can monkeypatch
+    GITHUB_ALLOWED_USER_IDS and assert on real allow/deny behavior.
+    """
+    import utils.github_access_control as github_access_control
+    monkeypatch.setattr(github_access_control, "is_github_user_authorized", lambda github_user_id: True)
+
+
+@pytest.fixture(autouse=True)
 def _default_fake_preferences(monkeypatch):
     """
     Stage 5C added a PostgreSQL-backed identity/preferences layer
