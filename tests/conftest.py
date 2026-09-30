@@ -620,9 +620,33 @@ def postgres_db(postgres_container, monkeypatch):
     from alembic import command
     from alembic.config import Config
 
+    # alembic/env.py calls logging.config.fileConfig(alembic.ini) up front,
+    # every time command.upgrade() runs it (including the effectively-no-op
+    # re-runs after the first, since this container's schema is already at
+    # "head" but env.py still executes). fileConfig()'s default
+    # disable_existing_loggers=True then permanently disables every
+    # already-instantiated logger NOT named in alembic.ini's [loggers]
+    # section (root, sqlalchemy, alembic only) -- including this app's
+    # shared 'bot' logger (utils/logging.py), configured once for the whole
+    # pytest session in pytest_configure() above. That's a real, process-
+    # wide Logger object cached by logging's manager: once disabled, every
+    # later test's logging/caplog assertions against it silently see no
+    # records, regardless of test ordering or which test happens to be the
+    # first to reach this fixture. Snapshot every logger's `.disabled` flag
+    # here and restore it right after, so this fixture's own use of Alembic
+    # can never leak that side effect past this one function call.
+    _loggers_disabled_snapshot = {
+        name: lg.disabled
+        for name, lg in logging.Logger.manager.loggerDict.items()
+        if isinstance(lg, logging.Logger)
+    }
     cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
     cfg.attributes["sqlalchemy_url"] = postgres_container
     command.upgrade(cfg, "head")
+    for _name, _was_disabled in _loggers_disabled_snapshot.items():
+        _lg = logging.Logger.manager.loggerDict.get(_name)
+        if isinstance(_lg, logging.Logger):
+            _lg.disabled = _was_disabled
 
     from sqlalchemy import text
     engine = db_engine.get_sync_engine()
