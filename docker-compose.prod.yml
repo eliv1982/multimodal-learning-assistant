@@ -50,19 +50,24 @@ volumes:
 
 # Single source of truth for the app's PostgreSQL DSN: derived from the
 # same POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB values the `postgres`
-# service itself is bootstrapped with, host fixed to the Compose DNS name
-# "postgres" and port fixed to 5432 (never published elsewhere) — this is
-# what removes any risk of the app's DATABASE_URL silently drifting from
-# the actual database credentials/name. POSTGRES_PASSWORD is interpolated
-# into this URL verbatim (no automatic URL-encoding) — see
-# .env.production.example's own note: use a generated, URL-safe secret
-# (e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"`),
-# never a password containing '@', ':', '/', '#', '%', or other DSN-special
-# characters. Do not percent-encode the password as a workaround: the same
-# raw value is also passed to the `postgres` service below as the literal
-# password, so encoding it only here would create a mismatch.
+# service itself is bootstrapped with, host fixed to the unique
+# app-internal network alias "mla-postgres-internal" (not the plain
+# Compose DNS name "postgres" — on the production host, an unrelated
+# container on the shared app-public/Traefik network already publishes
+# that alias, and since the app joins both networks, "postgres" resolved
+# to the wrong container) and port fixed to 5432 (never published
+# elsewhere) — this is what removes any risk of the app's DATABASE_URL
+# silently drifting from the actual database credentials/name.
+# POSTGRES_PASSWORD is interpolated into this URL verbatim (no automatic
+# URL-encoding) — see .env.production.example's own note: use a
+# generated, URL-safe secret (e.g. `python -c "import secrets;
+# print(secrets.token_urlsafe(32))"`), never a password containing '@',
+# ':', '/', '#', '%', or other DSN-special characters. Do not
+# percent-encode the password as a workaround: the same raw value is also
+# passed to the `postgres` service below as the literal password, so
+# encoding it only here would create a mismatch.
 x-database-url: &database_url
-  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@mla-postgres-internal:5432/${POSTGRES_DB}
 
 services:
   postgres:
@@ -75,7 +80,9 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
-      - app-internal
+      app-internal:
+        aliases:
+          - mla-postgres-internal
     security_opt:
       - no-new-privileges:true
     healthcheck:
