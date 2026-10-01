@@ -28,8 +28,8 @@ networks:
   # means `docker compose up` never creates or owns it, and never removes
   # it on `down`.
   #
-  # NO DEFAULT — see docs/PRODUCTION_DEPLOYMENT.md, "Open issues /
-  # server-dependent values": the prompt's stated expectation
+  # NO DEFAULT — see docs/PRODUCTION_DEPLOYMENT.md, section 4
+  # ("Внешняя Traefik-сеть"): the prompt's stated expectation
   # (n8n_n8n_network) does not match the only Traefik-shaped network name
   # observed on the machine this file was authored on
   # (n8n_n8n-network, hyphen) — and that machine is a local dev box, not
@@ -147,7 +147,7 @@ services:
       - "traefik.http.routers.mla.rule=Host(`learn.elivcloud.org`)"
       # NO DEFAULTS (entrypoint name, cert resolver name) — see the
       # app-public network comment above and
-      # docs/PRODUCTION_DEPLOYMENT.md's open-issues section. A guessed
+      # docs/PRODUCTION_DEPLOYMENT.md, section 4. A guessed
       # default here would silently route through the wrong entrypoint/
       # cert resolver instead of failing loudly, so both fail closed until
       # confirmed against the real Traefik configuration (e.g. the

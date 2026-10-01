@@ -1,36 +1,50 @@
-# Production-развёртывание (Stage 8B)
+# Production-развёртывание
 
-Этот документ — операционный runbook для развёртывания приложения через
-`docker-compose.prod.yml` на существующем production-сервере с уже
-работающим Traefik. Он описывает **контракт** развёртывания; сам live
-deployment на реальный сервер — отдельный этап (Stage 8C), выполняемый
-только после независимого аудита Stage 8B.
+Операционный runbook для развёртывания, обновления, отката и восстановления
+приложения через `docker-compose.prod.yml` за внешним Traefik. Приложение
+работает в production на [learn.elivcloud.org](https://learn.elivcloud.org).
 
 Не меняет архитектуру приложения: один процесс (`python service_main.py`,
-Telegram + web в одном asyncio-процессе — см. README.md, "Единый процесс:
-Telegram + web (Stage 7A-3)"), один embedded-режим Qdrant, один PostgreSQL.
+Telegram + web в одном asyncio-процессе — см. README.md, «Единый процесс:
+Telegram + web»), один embedded-режим Qdrant, один PostgreSQL.
+
+## Текущее состояние production
+
+- Приложение доступно по https://learn.elivcloud.org, развёртывание завершено;
+  репозиторий на сервере находится на актуальной ветке `main`.
+- Сервисы `app` и `postgres` — `healthy`.
+- Внешняя Traefik-сеть — `n8n_n8n_network`, entrypoint — `websecure`,
+  certificate resolver — `letsencrypt` (раздел 4).
+- Access-логирование Traefik выключено (раздел 4a).
+- Порт приложения (8000) и порт PostgreSQL (5432) наружу не публикуются.
+  Приложение достигает PostgreSQL по уникальному приватному алиасу
+  `mla-postgres-internal` во внутренней сети `app-internal`.
+- Вход через GitHub ограничен allowlist (`GITHUB_ALLOWED_USER_IDS`);
+  связывание Telegram настроено и работает.
+- Первичная production smoke-проверка пройдена: web-чат, загрузка и удаление
+  документов через web, RAG-поиск в связанном Telegram (раздел 11).
+- Известное ограничение — переподключение к PostgreSQL после его перезапуска
+  (раздел 18).
 
 ## 1. Prerequisites
 
 - Docker Engine + Docker Compose v2 на целевом сервере.
-- Уже работающий Traefik-стек с внешней Docker-сетью, к которой
-  подключаются проксируемые приложения (см. раздел 4).
-- DNS-запись `learn.elivcloud.org` уже указывает на этот сервер (раздел 3).
-- Доступ к реальным production-креденшлам: Telegram bot token, OpenAI API
-  key, Anthropic API key, отдельное GitHub OAuth App для продакшна.
+- Работающий Traefik-стек с внешней Docker-сетью, к которой подключаются
+  проксируемые приложения (см. раздел 4).
+- DNS-запись `learn.elivcloud.org` указывает на этот сервер (раздел 3).
+- Реальные production-креденшлы: Telegram bot token, OpenAI API key,
+  Anthropic API key, отдельное GitHub OAuth App для продакшна.
 - Репозиторий склонирован на сервере; рабочая директория — корень
   репозитория (где лежат `Dockerfile`, `docker-compose.prod.yml`).
-- **Credential rotation gate пройден** — см. раздел 1a. Это обязательный
-  шаг ДО первого запуска production-стека, не опциональный.
+- Креденшлы выпущены и проверены в соответствии с разделом 1a.
 
-## 1a. ОБЯЗАТЕЛЬНЫЙ pre-deployment gate: ротация креденшлов
+## 1a. Креденшлы: ротация и хранение
 
-Любые значения этих креденшлов, которые существовали до/во время Stage 8B
-(включая любые значения, которые могли быть видны в рабочих материалах,
-логах, скриншотах или где-либо ещё вне защищённого секрет-хранилища),
+Любые значения перечисленных ниже креденшлов, которые могли быть видны вне
+защищённого секрет-хранилища (рабочие материалы, логи, скриншоты и т.п.),
 считаются **скомпрометированными** и НЕ ДОЛЖНЫ использоваться в production.
-Перед Stage 8C / любым live-запуском этого стека ОБЯЗАТЕЛЬНО должны быть
-сгенерированы заново (rotated):
+Их нужно выпустить заново (rotate) до запуска стека — и при любом подозрении
+на компрометацию позже:
 
 - **Anthropic API key** — новый ключ выпущен в Anthropic Console; старый
   отозван после переключения.
@@ -46,37 +60,35 @@ Telegram + web (Stage 7A-3)"), один embedded-режим Qdrant, один Pos
   (`python -c "import secrets; print(secrets.token_urlsafe(32))"`),
   никогда не переиспользуется значение из dev/предыдущих тестов.
 
-**НЕ входит в обязательную ротацию:**
+**НЕ входит в ротацию:**
 
 - **`GITHUB_CLIENT_ID`** — это публичный идентификатор OAuth App, не
   секрет; ротация не требуется.
 - **`TELEGRAM_ALLOWED_USER_IDS`** — это не credential (числовой Telegram
   user id, не секрет доступа сам по себе), ротация не требуется. Тем не
   менее это privacy-значение: убедитесь, что список содержит только
-  реально предназначенных пользователей перед production-запуском.
-- **`GITHUB_ALLOWED_USER_IDS`** (pre-deployment corrective pass) — тот же
-  статус, что и `TELEGRAM_ALLOWED_USER_IDS` выше: не credential, ротация
-  не требуется, но это ОБЯЗАТЕЛЬНОЕ privacy/access-control значение —
-  продукт private/invite-only, а не публичный. Пусто/не задано = вход
-  через GitHub запрещён всем (fail closed), НЕ "всем разрешено" — успешная
-  GitHub OAuth-аутентификация сама по себе больше не достаточна для
-  доступа к web-приложению (см. utils/github_access_control.py). Укажите
-  здесь числовые GitHub user id (never `login`/username) владельца и
-  каждого доверенного пользователя перед production-запуском.
+  реально предназначенных пользователей.
+- **`GITHUB_ALLOWED_USER_IDS`** — тот же статус, что и
+  `TELEGRAM_ALLOWED_USER_IDS` выше: не credential, ротация не требуется,
+  но это ОБЯЗАТЕЛЬНОЕ privacy/access-control значение — продукт
+  private/invite-only, а не публичный. Пусто/не задано = вход через GitHub
+  запрещён всем (fail closed), НЕ "всем разрешено" — успешная GitHub OAuth-
+  аутентификация сама по себе недостаточна для доступа к web-приложению
+  (см. `utils/github_access_control.py`). Укажите здесь числовые GitHub user
+  id (never `login`/username) владельца и каждого доверенного пользователя.
 
 **Требования к процессу:**
 
-- Старые (пред-ротационные) значения перечисленных выше credential
-  категорий НЕЛЬЗЯ использовать в production ни при каких
-  обстоятельствах.
+- Старые (скомпрометированные) значения перечисленных выше категорий
+  НЕЛЬЗЯ использовать в production ни при каких обстоятельствах.
 - `.env.production` на production-сервере должен содержать ТОЛЬКО новые,
   ротированные значения.
-- Ротация должна быть **завершена и проверена** (новое значение реально
-  работает — например, пробный вызов API/успешный OAuth-обмен/успешная
-  Telegram `get_me`) ДО запуска production-стека (раздел 8).
+- Новое значение должно быть проверено (например, пробный вызов API/успешный
+  OAuth-обмен/успешная Telegram `get_me`) ДО запуска или перезапуска
+  production-стека с ним (раздел 8).
 
-Реальные старые или новые значения секретов никогда не записываются в
-этот или любой другой файл репозитория.
+Реальные значения секретов никогда не записываются в этот или любой другой
+файл репозитория.
 
 ## 2. Переменные окружения / секреты
 
@@ -91,11 +103,11 @@ cp .env.production.example .env.production
 **Важно:** файл называется именно `.env.production`, а не `.env` —
 `docker-compose.prod.yml` ссылается на него явно (`env_file:
 .env.production`), чтобы никогда случайно не подхватить чужой/несвязанный
-`.env`, который может существовать в директории по другой причине (это
-не гипотетический риск — см. раздел 15 итогового отчёта Stage 8B: именно
-так в процессе верификации едва не утекли реальные dev-секреты через
-`docker compose config`, пока путь не был явно разделён). `.env.production`
-уже в `.gitignore` — никогда не коммитить.
+`.env`, который может существовать в директории по другой причине:
+`env_file:` — это буквальный путь, на который не влияет
+`docker compose --env-file`, и общее имя `.env` могло бы тихо загрузить
+посторонние локальные dev-секреты (например, через `docker compose config`).
+`.env.production` уже в `.gitignore` — никогда не коммитить.
 
 Сгенерировать секреты:
 
@@ -106,9 +118,11 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"  # POSTGRES_PASSWOR
 
 ## 3. DNS
 
-Предполагается, что `learn.elivcloud.org` уже резолвится на публичный IP
-этого сервера **до** начала Stage 8C (не проверяется этим этапом и не
-проверяется кодом этого приложения).
+`learn.elivcloud.org` должен резолвиться на публичный IP production-сервера
+**до** первого запуска (это не проверяется кодом приложения). Для нового
+сервера или нового имени хоста обновите DNS-запись, `Host(...)` в Traefik-
+labels `docker-compose.prod.yml` и `GITHUB_REDIRECT_URI` в `.env.production`
+(он должен точно совпадать с callback URL production OAuth App).
 
 ## 4. Внешняя Traefik-сеть
 
@@ -116,24 +130,22 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"  # POSTGRES_PASSWOR
 Compose ожидает, что эта Docker-сеть **уже существует**, созданная
 существующим Traefik-стеком, и никогда не создаёт/не удаляет её сама.
 
+Значения, с которыми работает production (задаются в `.env.production`):
+
+| Переменная | Значение в production |
+|---|---|
+| `TRAEFIK_NETWORK_NAME` | `n8n_n8n_network` |
+| `TRAEFIK_ENTRYPOINT` | `websecure` |
+| `TRAEFIK_CERT_RESOLVER` | `letsencrypt` |
+
+Это значения конкретного сервера. При развёртывании на другом сервере
+подтвердите реальные имена до первого запуска:
+
 ```bash
-docker network ls | grep -i traefik   # или n8n / известное имя сети
+docker network ls                      # найти имя Traefik-сети
+docker network ls | grep -i traefik    # или по известному имени сети
+docker inspect <существующий-проксируемый-контейнер> --format '{{json .Config.Labels}}'  # entrypoint/certresolver-конвенции
 ```
-
-**НЕПОДТВЕРЖДЕНО** — см. итоговый отчёт Stage 8B, раздел "Open issues":
-ожидаемое имя из исходного запроса (`n8n_n8n_network`) не совпадает с
-единственной похожей сетью, реально увиденной при подготовке этого
-файла (`n8n_n8n-network`, через дефис) — а эта машина является локальной
-dev-машиной, не production-сервером, так что ни то, ни другое имя не
-является подтверждённым фактом о реальном сервере. Перед Stage 8C:
-
-```bash
-docker network ls                      # найти реальное имя
-docker inspect <существующий-plain-english-контейнер> --format '{{json .Config.Labels}}'  # entrypoint/certresolver-конвенции
-```
-
-Установить подтверждённые значения в `.env.production`:
-`TRAEFIK_NETWORK_NAME`, `TRAEFIK_ENTRYPOINT`, `TRAEFIK_CERT_RESOLVER`.
 
 Эти три переменные в `docker-compose.prod.yml` объявлены через
 required-variable синтаксис (`${VAR:?...}`) — БЕЗ defaults. Пока они не
@@ -141,56 +153,65 @@ required-variable синтаксис (`${VAR:?...}`) — БЕЗ defaults. Пок
 явно (fail closed), а не тихо подставляет непроверенное значение.
 `.env.production.example` намеренно оставляет их пустыми.
 
+### PostgreSQL: приватный алиас
+
+`DATABASE_URL` приложения вычисляется Compose из `POSTGRES_*` и указывает на
+уникальный алиас `mla-postgres-internal` во внутренней сети `app-internal`
+(`internal: true`, без выхода в интернет), а не на обычное имя сервиса
+`postgres`: `app` подключён и к `app-internal`, и к общей Traefik-сети, а на
+ней посторонний контейнер может публиковать алиас `postgres` — тогда имя
+`postgres` резолвилось бы в чужой контейнер. Порт 5432 никогда не
+публикуется ни на хост, ни в публичную сеть.
+
 ## 4a. Security requirement: OAuth callback query-параметры в reverse-proxy логах
 
 `GET /api/auth/github/callback` получает sensitive query-параметры
 (`code`, `state` — одноразовый authorization code и CSRF-state OAuth 2.0
-обмена). Application-side (Uvicorn access logging) это уже учтено и не
-меняется в Stage 8B. Но reverse-proxy (Traefik) по умолчанию может писать
+обмена). Приложение уже учитывает это на своей стороне (Uvicorn access
+logging отключён). Но reverse-proxy (Traefik) по умолчанию может писать
 полный запрошенный URL, включая query string, в свои access-логи — это
 самостоятельная утечка sensitive данных, независимая от логирования
 приложения.
 
-**Требование (обязательно к выполнению на Stage 8C, до открытия маршрута
-наружу):** для маршрута `/api/auth/github/callback` на стороне Traefik
-должно быть выполнено одно из:
+**Состояние в production:** access-логирование Traefik выключено, поэтому
+query-параметры callback не попадают в access-логи Traefik.
 
-- access logging отключён для этого конкретного маршрута; ИЛИ
+**Требование (остаётся в силе при любом изменении конфигурации Traefik и
+при развёртывании на другом сервере):** для маршрута
+`/api/auth/github/callback` на стороне Traefik должно быть выполнено одно из:
+
+- access logging отключён (глобально или для этого конкретного маршрута); ИЛИ
 - query string / sensitive параметры (`code`, `state`) редактируются
   (redacted) в access-логе.
 
 Конкретный Traefik-синтаксис здесь намеренно не фиксируется — он зависит
-от реальной версии/конфигурации Traefik на целевом сервере (статический
-vs динамический конфиг, уже используемые middleware у других
-проксируемых приложений) и не проверен в Stage 8B. Вместо этого Stage 8C
-checklist должен включать:
+от версии/конфигурации Traefik на сервере (статический vs динамический
+конфиг, уже используемые middleware у других проксируемых приложений).
+Проверка (повторяйте после любого изменения конфигурации логирования):
 
-1. Зафиксировать это security-требование как часть реальной Traefik-
-   конфигурации маршрута `mla` (см. `docker-compose.prod.yml`'s
-   `traefik.http.routers.mla.*` labels).
-2. Реализовать actual Traefik-конфигурацию (labels/middleware/статический
-   конфиг — по месту, под реальный Traefik setup сервера).
-3. Выполнить dummy-запрос на `/api/auth/github/callback` с тестовыми
+1. Убедитесь, что требование отражено в реальной Traefik-конфигурации
+   маршрута `mla` (см. `docker-compose.prod.yml`'s
+   `traefik.http.routers.mla.*` labels и конфигурацию самого Traefik).
+2. Выполните dummy-запрос на `/api/auth/github/callback` с тестовыми
    `code`/`state` значениями (реальный OAuth-обмен для этого не нужен —
    подходит любой GET-запрос с этими query-параметрами, даже если
    приложение ответит ошибкой из-за невалидного `state`).
-4. Проверить Traefik access-логи за это время.
-5. Подтвердить, что значения `code`/`state` НЕ присутствуют в
+3. Просмотрите Traefik access-логи (если они включены) за это время.
+4. Подтвердите, что значения `code`/`state` НЕ присутствуют в
    просмотренных логах (ни в открытом виде, ни частично).
 
-Пока этот пункт не выполнен и не подтверждён на Stage 8C, маршрут не
-считается production-ready с точки зрения privacy реверс-прокси логов.
-
-## 5. Первичная сборка
+## 5. Сборка
 
 ```bash
 docker compose -f docker-compose.prod.yml --env-file ./.env.production build
 ```
 
-Собирает ТОТ ЖЕ принятый Stage 8A `Dockerfile` (с одним точечным
-исправлением Stage 8B — см. итоговый отчёт, раздел "Files changed":
-`data/generated_images` теперь тоже создаётся и `chown`-ится для
-non-root runtime-пользователя, иначе процесс падал при старте).
+Собирает `Dockerfile` из репозитория: multi-stage сборка (frontend на
+Node 24, runtime на Python 3.12), приложение работает под непривилегированным
+пользователем (UID/GID 10001). Каталоги, в которые приложение пишет во время
+работы (`data/qdrant`, `data/documents/uploads`, `data/generated_images`,
+`bot.log`), создаются и передаются этому пользователю при сборке образа —
+без `data/generated_images` процесс падал бы при старте.
 
 ## 6. Запуск PostgreSQL и проверка health
 
@@ -249,33 +270,51 @@ docker compose -f docker-compose.prod.yml --env-file ./.env.production ps app
 docker compose -f docker-compose.prod.yml --env-file ./.env.production logs app --tail=50
 ```
 
-## 10. HTTPS/routing — выполнить на Stage 8C (не проверяется здесь)
+## 10. HTTPS и маршрутизация
+
+После каждого (пере)развёртывания и любого изменения Traefik-конфигурации:
 
 - `curl -I https://learn.elivcloud.org/healthz` → `200`, валидный TLS-сертификат.
-- Проверить реальные Traefik-labels (`entrypoints`/`certresolver`) сматчились
-  с реальной конфигурацией (раздел 4).
-- Проверить, что порт 8000 НЕ достижим напрямую с хоста/извне, только через Traefik.
+- Реальные Traefik-labels (`entrypoints`/`certresolver`) соответствуют
+  конфигурации Traefik на сервере (раздел 4).
+- Порт 8000 НЕ достижим напрямую с хоста/извне, только через Traefik;
+  порт 5432 не опубликован вообще.
 
-## 11. Telegram smoke — выполнить на Stage 8C (не проверяется здесь)
+## 11. Smoke-проверка
 
-- Написать боту от аккаунта из `TELEGRAM_ALLOWED_USER_IDS`, получить ответ.
-- Убедиться, что неавторизованный `from_user.id` получает отказ (fail closed).
+Выполняйте после первого запуска на новом окружении и после значимых
+обновлений. На текущем production первичная smoke-проверка пройдена.
+
+- **Telegram:** написать боту от аккаунта из `TELEGRAM_ALLOWED_USER_IDS`,
+  получить ответ. Неавторизованный `from_user.id` получает отказ (fail
+  closed).
+- **Web-вход:** войти через GitHub аккаунтом из `GITHUB_ALLOWED_USER_IDS`.
+  Аккаунт вне списка не входит и не оставляет следа в таблицах идентичности.
+- **Связывание Telegram:** на сайте «Link Telegram» → открыть диплинк в
+  Telegram и нажать Start → «Check link status» показывает связанный
+  аккаунт. Связывайте аккаунты ДО загрузки документов через web: документы
+  GitHub-стороны при слиянии не переносятся и блокируют связывание.
+- **Web-чат:** отправить сообщение, получить ответ.
+- **Документы:** загрузить документ через web и удалить его.
+- **RAG в связанном Telegram:** загрузить документ через web, в Telegram
+  включить `/mode rag` и задать вопрос по этому документу — ответ строится
+  по загруженному документу. (Web-чат RAG не использует.)
 
 ## 12. Persistence-проверки
 
 ```bash
 docker volume ls | grep <project>_          # postgres_data, qdrant_data, uploads_data
 docker compose -f docker-compose.prod.yml --env-file ./.env.production restart app postgres
-# данные должны остаться — проверено в Stage 8B disposable-верификации, см. итоговый отчёт
+# данные должны остаться
 ```
 
-`/app/data/generated_images` и `/app/bot.log` **намеренно** не
-volume-mounted — см. итоговый отчёт Stage 8B, раздел "Persistence" за
-полным обоснованием (эфемерный DALL-E-вывод; файловый лог избыточен
-поверх `docker compose logs`, который пишет то же самое в консоль).
+Если перезапускается только `postgres` при работающем `app` — см. раздел 18.
 
-**Operational note: рост `/app/bot.log`.** Это ожидаемое поведение
-текущей Stage 8B реализации, не баг:
+`/app/data/generated_images` и `/app/bot.log` **намеренно** не
+volume-mounted: вывод DALL-E эфемерен, а файловый лог избыточен поверх
+`docker compose logs`, который пишет то же самое в консоль.
+
+**Operational note: рост `/app/bot.log`.** Это ожидаемое поведение, не баг:
 
 - `/app/bot.log` эфемерен — живёт в writable-слое контейнера, не в
   named volume, и не переживает пересоздание контейнера
@@ -284,17 +323,14 @@ volume-mounted — см. итоговый отчёт Stage 8B, раздел "Per
   (тот же `configure_logging()` пишет и в файл, и в консоль) — файл не
   является единственным источником логов.
 - `FileHandler` пишет в `bot.log` БЕЗ ротации, поэтому файл может расти
-  неограниченно в течение всего времени жизни контейнера (это не
-  меняется в Stage 8B — см. раздел "Accepted findings", logging
-  implementation не трогается).
+  неограниченно в течение всего времени жизни контейнера.
 - Operator должен учитывать использование storage контейнера
   (`docker system df`, `docker inspect` container size) на длинных
   интервалах между пересозданиями.
 - При аномальном росте допустимо controlled пересоздание контейнера
   (`docker compose ... up -d --force-recreate app`) ПОСЛЕ того, как
   нужные логи уже сохранены через `docker compose ... logs app` — это
-  контейнер, не хостовая конфигурация logrotate/системный редизайн,
-  который в Stage 8B не рассматривается.
+  операция над контейнером, а не настройка logrotate на хосте.
 
 ## 13. Обновление (update procedure)
 
@@ -308,6 +344,9 @@ docker compose -f docker-compose.prod.yml --env-file ./.env.production \
 # ошибки миграции не выяснена и не устранена (см. раздел 7).
 docker compose -f docker-compose.prod.yml --env-file ./.env.production up -d app
 ```
+
+После обновления выполните разделы 9–10 (health, HTTPS/routing) и, для
+значимых изменений, раздел 11.
 
 ## 14. Откат (rollback procedure)
 
@@ -366,17 +405,12 @@ docker compose -f docker-compose.prod.yml --env-file ./.env.production \
 `ERROR` в stdout/stderr, но продолжает выполнять последующие statements
 и завершается с exit code 0 — restore может частично провалиться и
 выглядеть успешным. С `ON_ERROR_STOP=1` первая же SQL-ошибка немедленно
-прерывает выполнение и `psql` возвращает ненулевой exit code (см. итоговый
-отчёт, раздел D).
+прерывает выполнение и `psql` возвращает ненулевой exit code.
 
 Креденшлы (`POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB`) никогда не
 хардкодятся в команде и никогда не выводятся на экран — обе команды
 ссылаются на них только по имени переменной, значения которых Compose
 уже передал контейнеру.
-
-Проверено (Stage 8B corrective pass) на disposable PostgreSQL: backup
-представительных данных → restore в отдельную disposable-БД → данные
-подтверждены идентичными (см. итоговый отчёт, раздел F).
 
 ### Qdrant (embedded local-path режим)
 
@@ -384,8 +418,8 @@ docker compose -f docker-compose.prod.yml --env-file ./.env.production \
 блокировка каталога на диске, никакого сетевого API/snapshot-эндпоинта
 здесь не задействовано. Копирование файлов ДЕЙСТВУЮЩЕГО каталога, пока
 процесс держит блокировку и потенциально пишет, транзакционно небезопасно
-(не проверено/не гарантировано текущим кодом) — поэтому backup требует
-короткого окна обслуживания. Это уже было верно и остаётся неизменным:
+(не гарантировано текущим кодом) — поэтому backup требует короткого окна
+обслуживания:
 
 ```bash
 # Backup (app остановлен на время копирования):
@@ -435,11 +469,6 @@ docker compose -f docker-compose.prod.yml --env-file ./.env.production logs app 
 # подтвердить, что ожидаемые данные возвращаются)
 ```
 
-Проверено (Stage 8B corrective pass) на disposable volume: представительные
-данные → backup → restore напрямую в volume с точным именем, которое
-Compose использует для `qdrant_data` → ownership 10001:10001 подтверждён
-→ содержимое подтверждено идентичным (см. итоговый отчёт, раздел G).
-
 ### Uploads
 
 **Важно:** uploads НЕЛЬЗЯ безопасно live-копировать без quiesce. Физический
@@ -486,12 +515,6 @@ docker compose -f docker-compose.prod.yml --env-file ./.env.production start app
 volumes через disposable helper-контейнер (`alpine` + volume mount), что
 одинаково работает на любом сервере.
 
-Проверено (Stage 8B corrective pass) на disposable named volume:
-представительный upload + sidecar-metadata файл → quiesced backup →
-restore в новый disposable volume → файл и метаданные подтверждены
-идентичными, UID 10001 ownership подтверждён (см. итоговый отчёт,
-раздел H).
-
 ## 16. Просмотр логов
 
 ```bash
@@ -524,3 +547,22 @@ docker compose -f docker-compose.prod.yml --env-file ./.env.production down -v
 
 Использовать `-v` осознанно только при полном, намеренном списании
 окружения — никогда как способ "просто перезапустить".
+
+## 18. Известные ограничения
+
+- **Переподключение к PostgreSQL после его перезапуска.** Smoke-проверка
+  перезапуска PostgreSQL показала, что первый запрос / первая сессия после
+  перезапуска базы могут завершиться ошибкой из-за необходимости
+  переподключения. Вероятная причина — устаревшие соединения в пуле: общий
+  SQLAlchemy engine (`db/engine.py`) создаётся без `pool_pre_ping`. Это
+  принято как известное ограничение и не блокирует эксплуатацию. Если после
+  перезапуска только `postgres` ошибки сохраняются, перезапустите и `app`
+  (`docker compose -f docker-compose.prod.yml --env-file ./.env.production restart app`).
+  Улучшение устойчивости, отложенное на после развёртывания: включить
+  `pool_pre_ping` для engine.
+- **Одна реплика приложения.** Embedded Qdrant держит эксклюзивную
+  блокировку каталога, поэтому второй экземпляр `app`, использующий тот же
+  volume, не запустится; масштабирование `app` в несколько реплик не
+  поддерживается.
+- **Backup Qdrant и uploads требует окна обслуживания** (остановка `app`) —
+  см. раздел 15.

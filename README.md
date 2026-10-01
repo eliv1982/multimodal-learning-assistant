@@ -17,7 +17,7 @@
 
 ## Архитектура и рантайм
 
-- **Один процесс** `python service_main.py`: Telegram-поллинг и FastAPI/Uvicorn работают в одном asyncio-процессе; тот же процесс раздаёт собранное React-приложение (один origin, без CORS). Подробнее — «Единый процесс: Telegram + web (Stage 7A-3)».
+- **Один процесс** `python service_main.py`: Telegram-поллинг и FastAPI/Uvicorn работают в одном asyncio-процессе; тот же процесс раздаёт собранное React-приложение (один origin, без CORS). Подробнее — «Единый процесс: Telegram + web».
 - **PostgreSQL** — каноническая идентичность пользователей, привязки Telegram/GitHub, серверные web-сессии, настройки, каталог владения документами. Схема создаётся только через Alembic-миграции. См. «PostgreSQL».
 - **Qdrant в embedded-режиме** (локальный каталог `data/qdrant/`, отдельный сервер не нужен) — производный, перестраиваемый индекс RAG. Из-за эксклюзивной блокировки каталога приложение запускается ровно в одной реплике. Источник содержимого документов — файлы и `.meta.json` на диске.
 - **Production:** Docker-образ (multi-stage: сборка frontend + Python 3.12) и `docker-compose.prod.yml` — приложение и PostgreSQL за внешним Traefik (TLS). См. «Production-развёртывание».
@@ -40,8 +40,8 @@
 Про совместный запуск Telegram-бота и web-адаптера в одном процессе
 (`service_main.py`) — обязательный вариант, когда работают оба адаптера:
 web-маршруты документов/поиска используют тот же локальный Qdrant — см.
-раздел «Единый процесс: Telegram + web (Stage 7A-3)» ниже. Про web-интерфейс
-(React, Node 24 LTS) — раздел «Web-интерфейс (React, Stage 7B)» ниже. Запуск
+раздел «Единый процесс: Telegram + web» ниже. Про web-интерфейс
+(React, Node 24 LTS) — раздел «Web-интерфейс (React)» ниже. Запуск
 в контейнерах (Docker Compose за Traefik, как в production) — раздел
 «Production-развёртывание» в конце.
 
@@ -57,9 +57,8 @@ web-маршруты документов/поиска используют то
 Этот список относится именно к каналу Telegram (`utils/access_control.py`,
 применяется в обработчиках бота) и не даёт доступа к web-входу через
 GitHub. Web-вход использует свою аутентификацию — GitHub OAuth и серверную
-сессию (см. «GitHub OAuth-логин (Stage 6B)») — но, начиная с
-pre-deployment corrective pass, успешной GitHub OAuth-аутентификации
-**самой по себе больше не достаточно**: продукт private/invite-only, и
+сессию (см. «GitHub OAuth-логин») — но успешной GitHub OAuth-аутентификации
+**самой по себе недостаточно**: продукт private/invite-only, и
 поверх аутентификации стоит отдельный, тоже fail-closed allowlist,
 `GITHUB_ALLOWED_USER_IDS` (`utils/github_access_control.py`) — числовые
 GitHub user id, никогда `login`/username. Оба списка (Telegram и GitHub)
@@ -67,7 +66,7 @@ GitHub user id, никогда `login`/username. Оба списка (Telegram �
 списке не даёт доступа через другой канал, и наличие/отсутствие записи в
 одном никак не влияет на проверку по другому.
 
-Начиная с этой стадии, Telegram-идентификатор — это **только внешняя
+Telegram-идентификатор — это **только внешняя
 идентичность адаптера**. Сразу после прохождения проверки доступа
 `from_user.id` разрешается в стабильный внутренний UUID (таблицы `users` +
 `telegram_accounts` в PostgreSQL, см. `app/identity.py`/`db/identity.py`), и
@@ -78,7 +77,7 @@ GitHub user id, никогда `login`/username. Оба списка (Telegram �
 
 ---
 
-## Web-адаптер (Stage 6A)
+## Web-адаптер
 
 Помимо Telegram-бота, репозиторий содержит отдельный FastAPI-адаптер
 (`web/`) поверх того же канонического слоя идентичности — без второй
@@ -95,10 +94,10 @@ SHA-256-дайджест (см. `db/auth_sessions.py`, `app/auth_session.py`).
   ```
   Требует `SESSION_SECRET_KEY` в `.env` (подпись CSRF-токенов) —
   без него адаптер не запустится (fail closed), см. `.env.example`.
-  Поскольку web-маршруты документов/поиска (Stage 7A-3) используют Qdrant,
+  Поскольку web-маршруты документов/поиска используют Qdrant,
   запускать этот процесс ОДНОВРЕМЕННО с `main.py` против одного и того же
   локального каталога Qdrant небезопасно и не поддерживается — см. «Единый
-  процесс: Telegram + web (Stage 7A-3)» ниже.
+  процесс: Telegram + web» ниже.
 - Эндпоинты: `GET /healthz` (без авторизации), `GET /api/me` (текущий
   пользователь — `id`, `created_at` и булево `telegram_linked`; сам
   Telegram id и внутренние детали не отдаются), `POST /api/logout`
@@ -107,7 +106,7 @@ SHA-256-дайджест (см. `db/auth_sessions.py`, `app/auth_session.py`).
   к самому токену сессии (`web/csrf.py`) — не единственная защита от CSRF,
   но SameSite=Lax остаётся дополнительным слоем, не основным механизмом.
 
-### GitHub OAuth-логин (Stage 6B)
+### GitHub OAuth-логин
 
 Браузер может дополнительно войти через настоящий OAuth 2.0 Authorization
 Code + PKCE (S256) флоу GitHub — `GET /api/auth/github/login` (редирект на
@@ -116,7 +115,7 @@ GitHub) и `GET /api/auth/github/callback` (обмен кода, резолв л
 канонический пользователь остаётся тем же `users.id` UUID, что и для
 Telegram, а не второй моделью пользователя.
 
-- **Allowlist поверх аутентификации** (pre-deployment corrective pass):
+- **Allowlist поверх аутентификации:**
   продукт private/invite-only, поэтому успешной GitHub OAuth-
   аутентификации самой по себе НЕ достаточно для доступа. `/callback`,
   получив проверенный `id` GitHub-аккаунта (и ДО того, как для него будет
@@ -163,10 +162,9 @@ Telegram, а не второй моделью пользователя.
   GitHub-маппинг к этому моменту вообще исчез (например, конкурентный
   unlink); сама эта функция `auth_generation` не проверяет и generation-
   aware не является — это отдельная, более узкая перепроверка. Проверку
-  generation-staleness (Stage 6C corrective pass, independent-audit
-  MAJOR 1: отклоняет попытку, если GitHub-маппинг был отвязан на более
-  позднем `auth_generation`, чем тот, что зафиксирован при старте этого
-  OAuth-флоу) выполняет ДО этого шага `app.github_identity.
+  generation-staleness (отклоняет попытку, если GitHub-маппинг был
+  отвязан на более позднем `auth_generation`, чем тот, что зафиксирован
+  при старте этого OAuth-флоу) выполняет ДО этого шага `app.github_identity.
   resolve_user_uuid_for_oauth()`, вызываемый в `web/github_oauth.py` перед
   `create_session_for_github()`. Здесь и далее "generation" — счётчик
   `auth_generation`/unlink race gate, а не лимит одновременных LLM text-
@@ -178,7 +176,7 @@ Telegram, а не второй моделью пользователя.
   Telegram-пользователь; автоматическое слияние по email/username/
   эвристике никогда не происходит. Явное связывание этих двух аккаунтов
   одним и тем же человеком — отдельный, сознательный шаг пользователя,
-  см. "Связывание Telegram- и GitHub-аккаунтов (Stage 6C)" ниже.
+  см. «Связывание Telegram- и GitHub-аккаунтов» ниже.
 - Требует `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`/`GITHUB_REDIRECT_URI` в
   `.env` (см. `.env.example`) — без них web-адаптер не запустится (fail
   closed), это обязательный маршрут адаптера, не опциональный флаг.
@@ -191,14 +189,14 @@ Telegram, а не второй моделью пользователя.
   не может содержать userinfo/fragment/query, путь обязан быть ровно
   `/api/auth/github/callback`.
 
-#### Ограничение хранилища OAuth-транзакций и глобальный rate limit (Stage 6B corrective pass #1)
+#### Ограничение хранилища OAuth-транзакций и глобальный rate limit
 
 Каждый `GET /api/auth/github/login` — неаутентифицированный маршрут.
 Чтобы он не мог неограниченно расти в PostgreSQL, `db.oauth_transactions.
 create_sync()` выполняет ВСЁ следующее одной атомарной транзакцией,
 сериализованной между процессами через `SELECT ... FOR UPDATE` над
 singleton-строкой `github_oauth_admission` (тот же приём, что
-`web_session_policy` уже использует для Stage 6A cookie-posture):
+`web_session_policy` уже использует для политики cookie web-сессий):
 
 1. удаляет все просроченные строки `github_oauth_transactions`
    (индекс `ix_github_oauth_transactions_expires_at`);
@@ -251,7 +249,7 @@ cron/воркера и даже при нескольких процессах w
   rate-limit'ить `/api/auth/github/login` — defense-in-depth поверх
   описанного выше database-уровневого предела, никогда не замена ему.
 
-### Связывание Telegram- и GitHub-аккаунтов (Stage 6C)
+### Связывание Telegram- и GitHub-аккаунтов
 
 Аутентифицированный web-пользователь (вошедший через GitHub) может явно
 связать свой аккаунт с существующим Telegram-аккаунтом того же человека —
@@ -287,7 +285,7 @@ cron/воркера и даже при нескольких процессах w
   Владение документами/данными в Qdrant НИКОГДА не переписывается — они
   физически принадлежат Telegram UUID с самого начала, поэтому никакого
   переноса не требуется. **Единственное исключение — настройки
-  (`user_preferences`, Stage 7B-3P):** `PATCH /api/settings` создаёт такую
+  (`user_preferences`):** `PATCH /api/settings` создаёт такую
   строку у любого web-пользователя, и одна лишь сохранённая настройка не
   должна навсегда блокировать связывание.
   - **Значения по умолчанию — эффективные, а не сохранённые.** `BOT_MODE`
@@ -298,8 +296,7 @@ cron/воркера и даже при нескольких процессах w
     `app/preferences.py` — используют и Telegram
     (`UserSession.get_mode/get_voice`), и `GET /api/settings` (он по-прежнему
     ничего не пишет), поэтому они всегда согласованы. `/start` НЕ создаёт и
-    НЕ обновляет `user_preferences` (раньше он записывал `BOT_MODE` — этого
-    больше нет): строка появляется, только когда пользователь что-то выбрал
+    НЕ обновляет `user_preferences`: строка появляется, только когда пользователь что-то выбрал
     (`/mode`, `/voice`, `PATCH /api/settings`) либо когда она перенесена при
     слиянии. `BOT_MODE`/`DEFAULT_VOICE` проверяются при загрузке
     конфигурации (`config.py`): неподдерживаемое значение — ошибка запуска, а
@@ -344,7 +341,7 @@ cron/воркера и даже при нескольких процессах w
     (409) сессия и cookie не трогаются.
 - **Порядок блокировок** (защита от deadlock между конкурентными
   попытками связывания/отвязки/выпуска сессии для одного и того же
-  пользователя; Stage 6C corrective pass, independent-audit MAJOR 2) —
+  пользователя) —
   advisory-блокировка нужного flow (когда применима: redemption —
   `pg_advisory_xact_lock(telegram_user_id)`; unlink —
   `pg_advisory_xact_lock(-github_user_id)`; создание попытки — без
@@ -360,7 +357,7 @@ cron/воркера и даже при нескольких процессах w
   `github_accounts` и `users`, забирает (claim) попытку и уже ПОСЛЕ этого, в
   той же транзакции и под уже удерживаемыми блокировками, выполняет
   классификацию отказа, проверку документов, классификацию/нормализацию/перенос настроек
-  (Stage 7B-3P) и мутации слияния. Строки `user_preferences` всегда идут
+  и мутации слияния. Строки `user_preferences` всегда идут
   ПОСЛЕ `users`: redemption переносит настройки под удерживаемыми
   блокировками `users`, а `db/preferences.py` (`set_mode_sync`,
   `set_voice_sync`) перед записью берёт
@@ -381,7 +378,7 @@ cron/воркера и даже при нескольких процессах w
   logout: `POST /api/link/telegram/start` в этом случае просто отвечает
   общим HTTP 503.
 
-### Web-чат и настройки (Stage 7A-2)
+### Web-чат и настройки
 
 Все эндпоинты требуют валидную серверную сессию (иначе HTTP 401);
 изменяющие запросы (`POST`/`PATCH`) дополнительно требуют CSRF-заголовок
@@ -412,7 +409,7 @@ cron/воркера и даже при нескольких процессах w
   этим двум маршрутам. Любой невалидный запрос получает обезличенный ответ
   422 `{"detail": "Invalid request"}` без эха введённых данных.
 
-### Web-документы (Stage 7A-3 API, Stage 7B-4 интерфейс)
+### Web-документы
 
 Документы принадлежат пользователю: идентификатор берётся только из
 сессии, клиентского идентификатора нет. Документ виден и удаляется только
@@ -437,17 +434,17 @@ cron/воркера и даже при нескольких процессах w
   когда у пользователя активен режим `rag`. Web-чат их не использует.
 - При слиянии двух разных аккаунтов документы не переносятся: собственные
   документы GitHub-стороны блокируют связывание (см. «Связывание Telegram- и
-  GitHub-аккаунтов (Stage 6C)»). Если RAG нужен в Telegram, свяжите аккаунты
+  GitHub-аккаунтов»). Если RAG нужен в Telegram, свяжите аккаунты
   ДО загрузки документов через web.
 
-### Единый процесс: Telegram + web (Stage 7A-3)
+### Единый процесс: Telegram + web
 
 Локальный Qdrant (`QdrantClient(path=...)`, `rag/index.py`) держит
 эксклюзивную блокировку каталога на диске всё время жизни клиента — два
 разных OS-процесса не могут безопасно открыть один и тот же локальный
-каталог Qdrant одновременно. Начиная с этой стадии (подготовка к
-Qdrant-зависимым web-маршрутам документов/поиска) поддерживаемая
-production-топология для Telegram + web — **один процесс**:
+каталог Qdrant одновременно. Поскольку web-маршруты документов и поиска
+используют тот же Qdrant, поддерживаемая production-топология для
+Telegram + web — **один процесс**:
 
 ```
 python service_main.py
@@ -491,7 +488,7 @@ Telegram-поллинг (тот же `AsyncTeleBot` из `bot.py`, тот же `
   при обновлении любой из них нужно заново сверить `service_main.py` с
   новой установленной реализацией.
 
-### Web-интерфейс (React, Stage 7B)
+### Web-интерфейс (React)
 
 Каталог `frontend/` — React + TypeScript (Vite) приложение поверх
 backend-контракта, описанного выше. Оно не дублирует логику идентичности,
@@ -514,7 +511,7 @@ connections → Settings → Documents → Chat.
   Telegram-интерфейс (команды, приветствие, справка) пока остаётся только на
   русском.
 - **Вход и сессия.** Вход — только через GitHub (OAuth 2.0 Authorization
-  Code + PKCE, см. «GitHub OAuth-логин (Stage 6B)»): `state`, PKCE и сессия
+  Code + PKCE, см. «GitHub OAuth-логин»): `state`, PKCE и сессия
   целиком на стороне backend, браузер получает лишь HttpOnly-cookie.
   Состояние восстанавливается из `GET /api/me` (`id`, `created_at`,
   `telegram_linked`), выход — `POST /api/logout`. Пока выход выполняется,
@@ -527,7 +524,7 @@ connections → Settings → Documents → Chat.
   опрашивает — пользователь нажимает «Check link status» вручную. При
   слиянии двух разных аккаунтов существующие web-сессии GitHub-стороны
   отзываются, и нужен повторный вход через GitHub (см. «Связывание Telegram-
-  и GitHub-аккаунтов (Stage 6C)»). «Disconnect GitHub web access» отвязывает
+  и GitHub-аккаунтов»). «Disconnect GitHub web access» отвязывает
   GitHub (с подтверждением; завершает эту web-сессию) и **не** является
   отвязкой Telegram — её в интерфейсе нет.
 - **Settings.** Одно поле — предпочитаемый режим `text` / `voice` /
@@ -701,7 +698,7 @@ reverse proxy: Traefik, TLS и DNS управляются вне репозит�
 
 #### Векторное хранилище (Qdrant)
 
-С этой версии RAG использует **Qdrant** (локальный persistent-режим, `qdrant-client`) вместо ChromaDB:
+RAG использует **Qdrant** (локальный persistent-режим, `qdrant-client`), а не ChromaDB:
 
 - Данные хранятся локально в `data/qdrant/` — отдельный Qdrant-сервер не требуется, сетевые обращения к нему отсутствуют. **No Qdrant API key or Qdrant server is required in local mode.**
 - Qdrant — это **производное (rebuildable) состояние**, а не источник истины. Источник истины — версионируемые Markdown-файлы, перечисленные в `config.BUILTIN_REFERENCE_FILES` (см. ниже) и, для загруженных пользователями документов (Telegram или web), пара «физический файл + `.meta.json`» в `data/documents/uploads/`.
@@ -741,20 +738,20 @@ reverse proxy: Traefik, TLS и DNS управляются вне репозит�
 
 - `main.py` — точка входа Telegram-бота (standalone-режим), подключение обработчиков, индексация RAG, инициализация/закрытие DB-движка
 - `bot.py` — экземпляр бота (pyTelegramBotAPI)
-- `web_main.py` — точка входа web-адаптера (Stage 6A, standalone-режим — не запускается одновременно с `main.py` против одного каталога Qdrant, см. Stage 7A-3 ниже)
-- `service_main.py` — единая точка входа Telegram + web в одном процессе (Stage 7A-3) — поддерживаемая production-топология, ровно один владелец локального Qdrant
+- `web_main.py` — точка входа web-адаптера (standalone-режим — не запускается одновременно с `main.py` против одного каталога Qdrant, см. «Единый процесс: Telegram + web»)
+- `service_main.py` — единая точка входа Telegram + web в одном процессе — поддерживаемая production-топология, ровно один владелец локального Qdrant
 - `web_config.py` — настройки только для web-адаптера (`SESSION_SECRET_KEY` и др.), не требуется для Telegram-бота
 - `config.py` — настройки, пути, режимы (без Telegram-credential — см. `telegram_config.py`)
 - `telegram_config.py` — валидация `TELEGRAM_BOT_TOKEN`, импортируется только Telegram-адаптером (`bot.py`)
 - `handlers/` — start, text, voice, image, document_upload (тонкие Telegram-адаптеры; резолвят внутренний UUID сразу после проверки доступа)
-- `web/` — тонкий FastAPI-адаптер: app (фабрика приложения), routes (включая `POST /api/link/telegram/start`/`POST /api/unlink/github`, Stage 6C), dependencies (централизованная проверка текущего пользователя/CSRF), cookies, csrf, schemas (Stage 6A) + github_oauth (GitHub OAuth login/callback, Stage 6B) + `POST /api/chat`/`GET`/`PATCH /api/settings` и body_limit (64 KiB-лимит тела этих запросов, Stage 7A-2) + `/api/documents*`/`POST /api/retrieval/search` (Stage 7A-3) + frontend (раздача собранного React-приложения `frontend/dist`: только `/` и `/assets/...`, Stage 7B-1) — без бизнес-логики, весь резолвинг пользователя идёт через `app/auth_session.py`/`app/github_identity.py`/`app/telegram_link.py`
-- `app/` — Telegram/Web-независимый прикладной слой: tutor (оркестрация диалога), session (состояние диалога — история/pending-image эфемерны в памяти, mode/voice — durable в PostgreSQL), documents (транзакция загрузки/индексации документа), identity (резолв Telegram id → внутренний UUID), auth_session (жизненный цикл серверной web-сессии: создание/резолв/отзыв, включая GitHub-race-safe выпуск — Stage 6A/6C), github_identity (резолв GitHub id → внутренний UUID, Stage 6B), oauth_transaction (state/PKCE-транзакция GitHub-логина, Stage 6B), text_chat (stateless текстовое ядро, Stage 7A-1), preferences (единый резолвер эффективных mode/voice для Telegram и web — значения по умолчанию из `BOT_MODE`/`DEFAULT_VOICE`, Stage 7B-3P — и запись durable-режима для web без `user_sessions`, Stage 7A-2), telegram_link (генерация/хеширование bearer-секрета связывания, старт/redemption/отвязка — Stage 6C; сырой секрет никогда не покидает этот модуль и `web/routes.py`/`handlers/start.py`)
-- `db/` — слой PostgreSQL: settings (DATABASE_URL, без credential-зависимостей), base/models (SQLAlchemy ORM), engine (ленивый sync-движок), identity (race-safe резолв/создание пользователя, чтение профиля по UUID, проверка наличия Telegram-привязки), preferences (mode/voice upsert), documents (каталог владения документами), auth_sessions (хранение web-сессий — только SHA-256 дайджест токена, включая race-safe GitHub-выпуск сессии — Stage 6A/6C), github_identity (race-safe резолв/создание пользователя по GitHub id, Stage 6B), oauth_transactions (короткоживущая одноразовая OAuth-транзакция + database-authoritative admission control/rate limit, Stage 6B), telegram_link (создание/redemption/отвязка попытки связывания под скорректированным порядком блокировок — Stage 6C)
-- `frontend/` — React + TypeScript (Vite) web-приложение (Stage 7B): вход через GitHub, связывание аккаунтов, настройки, документы и текстовый чат; `npm ci`/`npm run build` — см. «Web-интерфейс (React, Stage 7B)» выше; `frontend/dist` — сгенерированный каталог, не коммитится
-- `github_oauth_config.py` — настройки только для GitHub-логина (`GITHUB_CLIENT_ID`/`SECRET`/`REDIRECT_URI` и др., Stage 6B), не требуется для Telegram-бота
-- `telegram_link_config.py` — настройки только для связывания Telegram/GitHub (`TELEGRAM_BOT_USERNAME` и др., Stage 6C); никогда не импортирует `TELEGRAM_BOT_TOKEN`; отсутствие/некорректность значения не ломает запуск web-адаптера
+- `web/` — тонкий FastAPI-адаптер: app (фабрика приложения), routes (включая `POST /api/link/telegram/start`/`POST /api/unlink/github`), dependencies (централизованная проверка текущего пользователя/CSRF), cookies, csrf, schemas + github_oauth (GitHub OAuth login/callback) + `POST /api/chat`/`GET`/`PATCH /api/settings` и body_limit (64 KiB-лимит тела этих запросов) + `/api/documents*`/`POST /api/retrieval/search` + frontend (раздача собранного React-приложения `frontend/dist`: только `/` и `/assets/...`) — без бизнес-логики, весь резолвинг пользователя идёт через `app/auth_session.py`/`app/github_identity.py`/`app/telegram_link.py`
+- `app/` — Telegram/Web-независимый прикладной слой: tutor (оркестрация диалога), session (состояние диалога — история/pending-image эфемерны в памяти, mode/voice — durable в PostgreSQL), documents (транзакция загрузки/индексации документа), identity (резолв Telegram id → внутренний UUID), auth_session (жизненный цикл серверной web-сессии: создание/резолв/отзыв, включая GitHub-race-safe выпуск), github_identity (резолв GitHub id → внутренний UUID), oauth_transaction (state/PKCE-транзакция GitHub-логина), text_chat (stateless текстовое ядро), preferences (единый резолвер эффективных mode/voice для Telegram и web — значения по умолчанию из `BOT_MODE`/`DEFAULT_VOICE` — и запись durable-режима для web без `user_sessions`), telegram_link (генерация/хеширование bearer-секрета связывания, старт/redemption/отвязка; сырой секрет никогда не покидает этот модуль и `web/routes.py`/`handlers/start.py`)
+- `db/` — слой PostgreSQL: settings (DATABASE_URL, без credential-зависимостей), base/models (SQLAlchemy ORM), engine (ленивый sync-движок), identity (race-safe резолв/создание пользователя, чтение профиля по UUID, проверка наличия Telegram-привязки), preferences (mode/voice upsert), documents (каталог владения документами), auth_sessions (хранение web-сессий — только SHA-256 дайджест токена, включая race-safe GitHub-выпуск сессии), github_identity (race-safe резолв/создание пользователя по GitHub id), oauth_transactions (короткоживущая одноразовая OAuth-транзакция + database-authoritative admission control/rate limit), telegram_link (создание/redemption/отвязка попытки связывания под фиксированным порядком блокировок — см. «Связывание Telegram- и GitHub-аккаунтов»)
+- `frontend/` — React + TypeScript (Vite) web-приложение: вход через GitHub, связывание аккаунтов, настройки, документы и текстовый чат; `npm ci`/`npm run build` — см. «Web-интерфейс (React)» выше; `frontend/dist` — сгенерированный каталог, не коммитится
+- `github_oauth_config.py` — настройки только для GitHub-логина (`GITHUB_CLIENT_ID`/`SECRET`/`REDIRECT_URI` и др.), не требуется для Telegram-бота
+- `telegram_link_config.py` — настройки только для связывания Telegram/GitHub (`TELEGRAM_BOT_USERNAME` и др.); никогда не импортирует `TELEGRAM_BOT_TOKEN`; отсутствие/некорректность значения не ломает запуск web-адаптера
 - `alembic/`, `alembic.ini` — миграции схемы PostgreSQL (`alembic upgrade head`)
-- `services/` — text_llm (провайдер-фасад), anthropic_client, openai_client, stt, tts, vision, image_generation, github_oauth_client (HTTP-клиент token exchange + `/user`, Stage 6B)
+- `services/` — text_llm (провайдер-фасад), anthropic_client, openai_client, stt, tts, vision, image_generation, github_oauth_client (HTTP-клиент token exchange + `/user`)
 - `rag/` — index (Qdrant, владение по `owner_user_uuid`), query, loader (PDF, TXT, MD, DOCX), identity (стабильные ID документов/чанков + валидация канонического UUID), sidecar (метаданные загруженных документов, схема v3)
 - `scripts/` — `rebuild_qdrant.py` (полная переиндексация Qdrant из исходников), `migrate_sidecars_v2_to_v3.py` (разовый перевод legacy-сайдкаров с Telegram-id на внутренний UUID)
 - `utils/` — logging, helpers (Telegram-утилиты: скачивание файлов, strip_markdown, очистка файлов), access_control (fail-closed allowlist по Telegram id)
@@ -781,11 +778,11 @@ Telegram-аккаунтов, настроек (mode/voice) и каталога �
 | `telegram_accounts` | Привязка Telegram id → `users.id` (unique в обе стороны) |
 | `user_preferences` | Сохранённая кастомизация `mode`/`voice` пользователя (durable); значения по умолчанию (`BOT_MODE`, `DEFAULT_VOICE`) в ней не хранятся — применяются при чтении |
 | `documents` | Каталог владения загруженными документами (`status`: pending/active/deleting; `deleting` — маркер возобновляемого удаления, добавлен миграцией `0005`; в списках, поиске и RAG участвуют только `active`) |
-| `web_sessions` | Серверные web-сессии (Stage 6A, `alembic/versions/0002_web_sessions.py`): `session_token_hash` (SHA-256 браузерного bearer-токена, PK) → `users.id`, `expires_at`, `revoked_at` |
-| `github_accounts` | Привязка числового GitHub id → `users.id` (Stage 6B, `alembic/versions/0003_github_oauth.py`), структурно как `telegram_accounts` |
-| `github_oauth_transactions` | Короткоживущая одноразовая OAuth-транзакция GitHub-логина (Stage 6B): `state_hash` (SHA-256 дайджест `state`, PK), `code_verifier` (PKCE), `expires_at` (индексирован для cleanup). Claim — атомарный `DELETE ... RETURNING`: заявленная/просроченная строка удаляется, а не помечается — таблица никогда не содержит «мёртвых» строк, и каждая существующая строка учитывается в потолке `github_oauth_admission` |
-| `github_oauth_admission` | Singleton-строка (`id=1`) глобального admission control для `/api/auth/github/login` (Stage 6B corrective pass #1): `window_start`, `starts_in_window` — фиксированное 60-секундное окно rate limit, читается/обновляется под `SELECT ... FOR UPDATE` в той же транзакции, что cleanup+вставка новой OAuth-транзакции |
-| `telegram_link_attempts` | Короткоживущая одноразовая попытка связывания Telegram/GitHub (Stage 6C, `alembic/versions/0004_telegram_link_attempts.py`): `web_user_id UUID PK` (FK → `users.id`, `ON DELETE RESTRICT` — явно, не подразумеваемый) → `link_secret_hash` (SHA-256 дайджест bearer-секрета, UNIQUE, никогда не сырое значение), `expires_at` (индексирован). Не более одной строки на пользователя — повторный запрос атомарно заменяет предыдущий |
+| `web_sessions` | Серверные web-сессии (`alembic/versions/0002_web_sessions.py`): `session_token_hash` (SHA-256 браузерного bearer-токена, PK) → `users.id`, `expires_at`, `revoked_at` |
+| `github_accounts` | Привязка числового GitHub id → `users.id` (`alembic/versions/0003_github_oauth.py`), структурно как `telegram_accounts` |
+| `github_oauth_transactions` | Короткоживущая одноразовая OAuth-транзакция GitHub-логина: `state_hash` (SHA-256 дайджест `state`, PK), `code_verifier` (PKCE), `expires_at` (индексирован для cleanup). Claim — атомарный `DELETE ... RETURNING`: заявленная/просроченная строка удаляется, а не помечается — таблица никогда не содержит «мёртвых» строк, и каждая существующая строка учитывается в потолке `github_oauth_admission` |
+| `github_oauth_admission` | Singleton-строка (`id=1`) глобального admission control для `/api/auth/github/login`: `window_start`, `starts_in_window` — фиксированное 60-секундное окно rate limit, читается/обновляется под `SELECT ... FOR UPDATE` в той же транзакции, что cleanup+вставка новой OAuth-транзакции |
+| `telegram_link_attempts` | Короткоживущая одноразовая попытка связывания Telegram/GitHub (`alembic/versions/0004_telegram_link_attempts.py`): `web_user_id UUID PK` (FK → `users.id`, `ON DELETE RESTRICT` — явно, не подразумеваемый) → `link_secret_hash` (SHA-256 дайджест bearer-секрета, UNIQUE, никогда не сырое значение), `expires_at` (индексирован). Не более одной строки на пользователя — повторный запрос атомарно заменяет предыдущий |
 
 Схема создаётся ТОЛЬКО через Alembic — приложение не создаёт таблицы
 самостоятельно при старте:
